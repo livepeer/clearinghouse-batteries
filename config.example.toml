@@ -1,0 +1,33 @@
+# Persistent accounting database. Keep it on a local filesystem.
+DBPath = "clearinghouse.db"
+
+# Enable one or more serve components.
+EnableAuthWebhook = true
+EnableKafka = true
+EnableAccounting = true
+EnableOnchainListener = false
+
+# Set CLEARINGHOUSE_WEBHOOK_TOKEN in the environment when the webhook is enabled.
+HTTPBind = "127.0.0.1:8080"
+
+# The embedded Kafka broker should listen only on a trusted loopback or private network.
+KafkaBind = "127.0.0.1:9092"
+KafkaTopic = "livepeer-signing"
+KafkaDataDir = "clearinghouse-kafka"
+
+# For external plaintext Kafka, set EnableKafka = false, keep EnableAccounting = true,
+# and provide bootstrap addresses. Do not use KafkaBrokers with embedded Kafka.
+# KafkaBrokers = ["broker1:9092", "broker2:9092"]
+
+# On-chain listener settings. RPCURL and SignerAddresses are required when enabled.
+# RPCURL = "https://YOUR_RPC"
+# SignerAddresses = ["0xYOUR_SIGNER"]
+# ChainID = "42161"       # Optional RPC chain assertion.
+# TicketBroker = "0x..."  # Optional override on Arbitrum One.
+# StartBlock = 123456789   # Omit to start a new database at the current head.
+Confirmations = 64
+
+# Durations in configuration files are integer nanoseconds (5 seconds here).
+PollInterval = 5000000000
+BlockBatchSize = 2000
+ReorgLookback = 256

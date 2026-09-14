@@ -1,0 +1,8 @@
+/bin/
+*.db
+*.db-wal
+*.db-shm
+*.lock
+/clearinghouse-kafka/
+/config.local.json
+*.swp
