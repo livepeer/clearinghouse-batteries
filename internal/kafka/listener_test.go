@@ -3,6 +3,7 @@ package kafka
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -73,6 +74,111 @@ func TestRealBrokerRestartAndReplay(t *testing.T) {
 	testutil.Must(t, f.DB.DB.QueryRow(`SELECT count(*) FROM signing_authorizations`).Scan(&count))
 	if count != 2 {
 		t.Fatal(count)
+	}
+}
+
+func TestBrokerConcurrentPublishAndShutdown(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	t.Cleanup(cancel)
+	dir := t.TempDir()
+	start := func() (*minikafka.Broker, context.Context, func()) {
+		t.Helper()
+		broker, err := OpenBroker(ctx, "127.0.0.1:0", "events", dir)
+		testutil.Must(t, err)
+		runCtx, stop := context.WithCancel(ctx)
+		done := make(chan error, 1)
+		go func() { done <- broker.Serve(runCtx) }()
+		closed := false
+		closeBroker := func() {
+			t.Helper()
+			if closed {
+				return
+			}
+			closed = true
+			stop()
+			testutil.Must(t, broker.Close())
+			select {
+			case err := <-done:
+				testutil.Must(t, err)
+			case <-ctx.Done():
+				t.Fatal("broker shutdown timed out")
+			}
+		}
+		t.Cleanup(closeBroker)
+		return broker, runCtx, closeBroker
+	}
+	broker, runCtx, stop := start()
+	acknowledged := make(map[int64]string)
+	for _, shutdown := range []bool{false, true} {
+		type result struct {
+			offset int64
+			value  string
+			err    error
+		}
+		const producers = 64
+		results := make(chan result, producers)
+		ready := make(chan struct{})
+		for i := range producers {
+			go func() {
+				<-ready
+				value := fmt.Sprintf("shutdown=%t producer=%d", shutdown, i)
+				offset, err := broker.Publish(runCtx, "events", nil, []byte(value))
+				results <- result{offset, value, err}
+			}()
+		}
+		close(ready)
+		for i := range producers {
+			var r result
+			select {
+			case r = <-results:
+			case <-ctx.Done():
+				t.Fatal("publishers did not finish")
+			}
+			if !shutdown || i == 0 {
+				testutil.Must(t, r.err)
+			}
+			if r.err == nil {
+				if _, exists := acknowledged[r.offset]; exists {
+					t.Fatalf("duplicate acknowledged offset %d", r.offset)
+				}
+				acknowledged[r.offset] = r.value
+			}
+			// Once one concurrent write succeeds, interrupt the remaining work.
+			// Best-effort shutdown may fail requests but must preserve successes.
+			if shutdown && i == 0 {
+				stop()
+			}
+		}
+	}
+
+	reopened, _, _ := start()
+	conn, err := kgo.DialLeader(ctx, "tcp", reopened.Addr(), "events", 0)
+	testutil.Must(t, err)
+	defer conn.Close()
+	deadline, _ := ctx.Deadline()
+	testutil.Must(t, conn.SetDeadline(deadline))
+	first, last, err := conn.ReadOffsets()
+	testutil.Must(t, err)
+	if first != 0 || last < int64(len(acknowledged)) {
+		t.Fatalf("unexpected retained offsets [%d,%d] for %d successes", first, last, len(acknowledged))
+	}
+	_, err = conn.Seek(0, kgo.SeekAbsolute)
+	testutil.Must(t, err)
+	for offset := int64(0); offset < last; offset++ {
+		msg, err := conn.ReadMessage(1 << 20)
+		testutil.Must(t, err)
+		if msg.Offset != offset {
+			t.Fatalf("offset gap: got %d, want %d", msg.Offset, offset)
+		}
+		if value, ok := acknowledged[offset]; ok {
+			if string(msg.Value) != value {
+				t.Fatalf("offset %d: got %q, want %q", offset, msg.Value, value)
+			}
+			delete(acknowledged, offset)
+		}
+	}
+	if len(acknowledged) != 0 {
+		t.Fatalf("lost acknowledged records: %v", acknowledged)
 	}
 }
 

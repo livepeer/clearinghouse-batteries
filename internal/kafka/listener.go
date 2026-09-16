@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -35,14 +34,15 @@ func OpenBroker(ctx context.Context, bind, topic, dir string) (*minikafka.Broker
 	if err != nil {
 		return nil, err
 	}
-	// MiniKafka's SQLite implementation applies connection-local pragmas on initialization.
-	// Serialize store operations to reuse that connection and prevent competing deferred writes.
-	serialized := &serialStore{Store: backend, topic: topic}
-	if err := serialized.Init(ctx); err != nil {
+	if err := backend.Init(ctx); err != nil {
 		backend.Close()
 		return nil, err
 	}
-	broker, err := minikafka.Open(minikafka.Config{Addr: bind, Store: serialized})
+	if err := backend.CreateTopic(ctx, topic, minikafka.TopicOptions{}); err != nil && !errors.Is(err, minikafka.ErrTopicExists) {
+		backend.Close()
+		return nil, err
+	}
+	broker, err := minikafka.Open(minikafka.Config{Addr: bind, Store: backend})
 	if err != nil {
 		backend.Close()
 		return nil, err
@@ -127,86 +127,4 @@ func (l *Listener) offsets(ctx context.Context) (int64, int64, error) {
 		}
 	}
 	return 0, 0, errors.Join(failures...)
-}
-
-// These forwarding methods intentionally serialize all accesses, including startup and shutdown.
-type serialStore struct {
-	minikafka.Store
-	mu          sync.Mutex
-	topic       string
-	initialized bool
-	initErr     error
-}
-
-func (s *serialStore) Init(ctx context.Context) (err error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.initialized {
-		return s.initErr
-	}
-	defer func() { s.initialized, s.initErr = true, err }()
-	if err := s.Store.Init(ctx); err != nil {
-		return err
-	}
-	err = s.Store.CreateTopic(ctx, s.topic, minikafka.TopicOptions{})
-	if errors.Is(err, minikafka.ErrTopicExists) {
-		return nil
-	}
-	return err
-}
-func (s *serialStore) Close() error { s.mu.Lock(); defer s.mu.Unlock(); return s.Store.Close() }
-func (s *serialStore) CreateTopic(c context.Context, t string, o minikafka.TopicOptions) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.Store.CreateTopic(c, t, o)
-}
-func (s *serialStore) DeleteTopic(c context.Context, t string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.Store.DeleteTopic(c, t)
-}
-func (s *serialStore) Topic(c context.Context, t string) (minikafka.TopicMetadata, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.Store.Topic(c, t)
-}
-func (s *serialStore) ListTopics(c context.Context) ([]minikafka.TopicMetadata, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.Store.ListTopics(c)
-}
-func (s *serialStore) Append(c context.Context, r minikafka.AppendRequest) (minikafka.AppendResult, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.Store.Append(c, r)
-}
-func (s *serialStore) Fetch(c context.Context, r minikafka.FetchRequest) (minikafka.FetchResult, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.Store.Fetch(c, r)
-}
-func (s *serialStore) CommitOffset(c context.Context, r minikafka.CommitOffsetRequest) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.Store.CommitOffset(c, r)
-}
-func (s *serialStore) FetchOffset(c context.Context, r minikafka.FetchOffsetRequest) (minikafka.FetchOffsetResult, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.Store.FetchOffset(c, r)
-}
-func (s *serialStore) EarliestOffset(c context.Context, t string) (int64, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.Store.EarliestOffset(c, t)
-}
-func (s *serialStore) LatestOffset(c context.Context, t string) (int64, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.Store.LatestOffset(c, t)
-}
-func (s *serialStore) ApplyRetention(c context.Context, t string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.Store.ApplyRetention(c, t)
 }
