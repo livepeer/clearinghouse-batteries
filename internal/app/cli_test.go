@@ -21,18 +21,19 @@ import (
 	"github.com/livepeer/clearinghouse/internal/store"
 	"github.com/livepeer/clearinghouse/internal/testutil"
 	kgo "github.com/segmentio/kafka-go"
+	"github.com/stretchr/testify/require"
 )
 
 func cli(t *testing.T, args ...string) string {
 	t.Helper()
 	var out, stderr bytes.Buffer
-	testutil.Must(t, Execute(context.Background(), args, &out, &stderr))
+	require.NoError(t, Execute(context.Background(), args, &out, &stderr))
 	return out.String()
 }
 func object(t *testing.T, s string) map[string]string {
 	t.Helper()
 	var m map[string]string
-	testutil.Must(t, json.Unmarshal([]byte(s), &m))
+	require.NoError(t, json.Unmarshal([]byte(s), &m))
 	return m
 }
 
@@ -122,8 +123,8 @@ func TestBoaConfigEnvironmentValidationAndHelp(t *testing.T) {
 	dir := t.TempDir()
 	config := filepath.Join(dir, "grant.json")
 	contents, err := json.Marshal(map[string]any{"Name": "from-config", "DBPath": filepath.Join(dir, "configured.db"), "AmountETH": "0.21", "Status": "active"})
-	testutil.Must(t, err)
-	testutil.Must(t, os.WriteFile(config, contents, 0600))
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(config, contents, 0600))
 	t.Setenv("CLEARINGHOUSE_DB_PATH", filepath.Join(dir, "environment.db"))
 	cli(t, "migrate", "up")
 	cli(t, "grant", "create", "--config-file", config, "--name", "from-flag")
@@ -178,7 +179,7 @@ func TestTOMLConfigAndPrecedence(t *testing.T) {
 	cli(t, "migrate", "up")
 	config := filepath.Join(dir, "grant.toml")
 	contents := []byte("Name = \"from-toml\"\nDBPath = \"" + filepath.Join(dir, "configured.db") + "\"\nAmountETH = \"0.125\"\nStatus = \"active\"\n")
-	testutil.Must(t, os.WriteFile(config, contents, 0600))
+	require.NoError(t, os.WriteFile(config, contents, 0600))
 	cli(t, "grant", "create", "--config-file", config, "--name", "from-flag")
 	got := cli(t, "grant", "list")
 	if !strings.Contains(got, `"name": "from-flag"`) || !strings.Contains(got, `"total_eth": "0.125"`) {
@@ -191,17 +192,17 @@ func TestTOMLConfigAndPrecedence(t *testing.T) {
 
 func TestManagementCommandsDoNotAutoMigrate(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "empty.db")
-	testutil.Must(t, os.WriteFile(path, nil, 0600))
+	require.NoError(t, os.WriteFile(path, nil, 0600))
 	t.Setenv("CLEARINGHOUSE_DB_PATH", path)
 	var out bytes.Buffer
 	if err := Execute(context.Background(), []string{"grant", "list"}, &out, &out); err == nil {
 		t.Fatal("management command migrated an empty database")
 	}
 	db, err := store.Open(context.Background(), path, false)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	defer db.Close()
 	var count int
-	testutil.Must(t, db.DB.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name='migrations'`).Scan(&count))
+	require.NoError(t, db.DB.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name='migrations'`).Scan(&count))
 	if count != 0 {
 		t.Fatal("management command created migration metadata")
 	}
@@ -210,7 +211,7 @@ func TestManagementCommandsDoNotAutoMigrate(t *testing.T) {
 func TestOrdinaryCommandsSkipMigrationPreflightButServeRejectsDrift(t *testing.T) {
 	f := testutil.New(t, "100")
 	_, err := f.DB.DB.Exec(`INSERT INTO migrations(version,filename,sha256,applied_at_ms) VALUES (999,'999_unknown.sql',?,0)`, strings.Repeat("0", 64))
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	t.Setenv("CLEARINGHOUSE_DB_PATH", f.Path)
 	if got := cli(t, "grant", "list"); !strings.Contains(got, f.Grant) {
 		t.Fatal(got)
@@ -238,7 +239,7 @@ func (startupRPC) GetLogs(context.Context, json.RawMessage) ([]types.Log, error)
 
 func TestAllComponentCombinations(t *testing.T) {
 	r := rpc.NewServer()
-	testutil.Must(t, r.RegisterName("eth", startupRPC{}))
+	require.NoError(t, r.RegisterName("eth", startupRPC{}))
 	srv := httptest.NewServer(r)
 	defer srv.Close()
 	for mask := 1; mask < 16; mask++ {
@@ -250,14 +251,14 @@ func TestAllComponentCombinations(t *testing.T) {
 			producerAddr := p.KafkaBind
 			if p.EnableAccounting && !p.EnableKafka {
 				broker, err := kafka.OpenBroker(context.Background(), testutil.Port(t), p.KafkaTopic, filepath.Join(dir, "external"))
-				testutil.Must(t, err)
+				require.NoError(t, err)
 				brokerCtx, stop := context.WithCancel(context.Background())
 				brokerDone := make(chan error, 1)
 				go func() { brokerDone <- broker.Serve(brokerCtx) }()
 				t.Cleanup(func() {
 					stop()
 					broker.Close()
-					testutil.Must(t, <-brokerDone)
+					require.NoError(t, <-brokerDone)
 				})
 				producerAddr = broker.Addr()
 				p.KafkaBrokers = []string{testutil.Port(t), producerAddr}
@@ -269,7 +270,7 @@ func TestAllComponentCombinations(t *testing.T) {
 				cancel()
 				select {
 				case err := <-done:
-					testutil.Must(t, err)
+					require.NoError(t, err)
 				case <-time.After(15 * time.Second):
 					t.Error("shutdown timed out")
 				}
@@ -314,9 +315,9 @@ func TestAllComponentCombinations(t *testing.T) {
 			if p.EnableAccounting {
 				w := kgo.NewWriter(kgo.WriterConfig{Brokers: []string{producerAddr}, Topic: p.KafkaTopic, BatchTimeout: time.Millisecond})
 				writeCtx, stop := context.WithTimeout(ctx, 5*time.Second)
-				testutil.Must(t, w.WriteMessages(writeCtx, kgo.Message{Value: []byte(`{"id":"startup","type":"other","data":{}}`)}))
+				require.NoError(t, w.WriteMessages(writeCtx, kgo.Message{Value: []byte(`{"id":"startup","type":"other","data":{}}`)}))
 				stop()
-				testutil.Must(t, w.Close())
+				require.NoError(t, w.Close())
 				testutil.Eventually(t, func() bool {
 					db, err := store.Open(ctx, p.DBPath, false)
 					if err != nil {
@@ -352,8 +353,8 @@ func TestServeFromJSONConfig(t *testing.T) {
 	bind := testutil.Port(t)
 	path := filepath.Join(dir, "serve.json")
 	data, err := json.Marshal(map[string]any{"DBPath": filepath.Join(dir, "config-only.db"), "EnableAuthWebhook": true, "HTTPBind": bind, "WebhookToken": "fixture-token"})
-	testutil.Must(t, err)
-	testutil.Must(t, os.WriteFile(path, data, 0600))
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, data, 0600))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
@@ -364,7 +365,7 @@ func TestServeFromJSONConfig(t *testing.T) {
 		cancel()
 		select {
 		case err := <-done:
-			testutil.Must(t, err)
+			require.NoError(t, err)
 		case <-time.After(15 * time.Second):
 			t.Error("shutdown timed out")
 		}
@@ -397,7 +398,7 @@ func TestCLIEscrowCommands(t *testing.T) {
 	f := testutil.New(t, "100")
 	ctx := context.Background()
 	stream := "42161:" + testutil.Contract + ":" + testutil.Sender
-	testutil.Must(t, f.DB.BootstrapChain(ctx, stream, store.Block{Number: -1}, []store.EscrowSnapshot{{ChainID: "42161", Contract: testutil.Contract, Sender: testutil.Sender, Deposit: "12", Reserve: "3"}}))
+	require.NoError(t, f.DB.BootstrapChain(ctx, stream, store.Block{Number: -1}, []store.EscrowSnapshot{{ChainID: "42161", Contract: testutil.Contract, Sender: testutil.Sender, Deposit: "12", Reserve: "3"}}))
 	t.Setenv("CLEARINGHOUSE_DB_PATH", f.Path)
 	if report := cli(t, "escrow", "report"); !strings.Contains(report, `"deposit_balance_eth": "0.000000000000000012"`) || !strings.Contains(report, `"total_balance_eth": "0.000000000000000015"`) || strings.Contains(report, "_wei") {
 		t.Fatal(report)
@@ -410,12 +411,12 @@ func TestCLIEscrowCommands(t *testing.T) {
 	txHash := "0x" + strings.Repeat("b", 64)
 	settlement := store.Settlement{ChainID: "42161", Contract: testutil.Contract, TxHash: txHash, BlockHash: blockHash, Sender: testutil.Sender, Recipient: testutil.Orch, FaceValue: "20", PaidAmount: "14", DepositPaid: "12", ReservePaid: "2", WinProb: "1", Nonce: "1", Rand: "1", PMSessionID: "0x" + strings.Repeat("c", 64), AuxData: "0x", BlockNumber: 0, LogIndex: 0, Timestamp: 1}
 	event := store.EscrowEvent{Type: store.WinningTicketRedeemed, ChainID: "42161", Contract: testutil.Contract, TxHash: txHash, BlockHash: blockHash, Sender: testutil.Sender, Recipient: testutil.Orch, Amount: "20", DepositAmount: "0", ReserveAmount: "0", BlockNumber: 0, LogIndex: 0, Timestamp: 1, Settlement: &settlement}
-	testutil.Must(t, f.DB.ApplyChain(ctx, stream, []store.Block{{Number: 0, Hash: blockHash}}, []store.EscrowEvent{event}, 4))
+	require.NoError(t, f.DB.ApplyChain(ctx, stream, []store.Block{{Number: 0, Hash: blockHash}}, []store.EscrowEvent{event}, 4))
 	if got := cli(t, "settlement", "list"); !strings.Contains(got, `"face_value_eth": "0.00000000000000002"`) || !strings.Contains(got, `"reserve_paid_eth": "0.000000000000000002"`) || strings.Contains(got, "_wei") {
 		t.Fatal(got)
 	}
 
-	testutil.Must(t, f.DB.Ingest(ctx, "test", 0, f.Event(t, "usage-output", "7", testutil.PM)))
+	require.NoError(t, f.DB.Ingest(ctx, "test", 0, f.Event(t, "usage-output", "7", testutil.PM)))
 	if got := cli(t, "usage", "list"); !strings.Contains(got, `"computed_fee_eth": "0.000000000000000007"`) || strings.Contains(got, "_wei") {
 		t.Fatal(got)
 	}

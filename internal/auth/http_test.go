@@ -12,6 +12,7 @@ import (
 
 	"github.com/livepeer/clearinghouse/internal/store"
 	"github.com/livepeer/clearinghouse/internal/testutil"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSignerWebhook(t *testing.T) {
@@ -21,14 +22,14 @@ func TestSignerWebhook(t *testing.T) {
 	call := func(token string, body any) (int, store.Decision) {
 		t.Helper()
 		b, err := json.Marshal(body)
-		testutil.Must(t, err)
+		require.NoError(t, err)
 		r := httptest.NewRequest("POST", "/v1/signer/authorize", bytes.NewReader(b))
 		r.Header.Set("Livepeer-Clearinghouse-Token", token)
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, r)
 		var d store.Decision
 		if w.Code == 200 {
-			testutil.Must(t, json.Unmarshal(w.Body.Bytes(), &d))
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &d))
 		}
 		return w.Code, d
 	}
@@ -70,11 +71,11 @@ func TestSignerWebhook(t *testing.T) {
 	r.Header.Set("Livepeer-Clearinghouse-Token", "signer-token")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
-	testutil.Must(t, json.Unmarshal(w.Body.Bytes(), &d))
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &d))
 	if d.Status != 401 {
 		t.Fatal(d)
 	}
-	testutil.Must(t, f.DB.SetStatus(ctx, "session", f.Session, "revoked"))
+	require.NoError(t, f.DB.SetStatus(ctx, "session", f.Session, "revoked"))
 	_, d = call("signer-token", f.Request)
 	if d.Status != 403 {
 		t.Fatal(d)
@@ -84,7 +85,7 @@ func TestSignerWebhook(t *testing.T) {
 	if d.Status != 200 {
 		t.Fatal(d)
 	}
-	testutil.Must(t, f.DB.SetStatus(ctx, "api-key", f.KeyID, "revoked"))
+	require.NoError(t, f.DB.SetStatus(ctx, "api-key", f.KeyID, "revoked"))
 	_, d = call("signer-token", f.Request)
 	if d.Status != 401 {
 		t.Fatal(d)
@@ -95,29 +96,29 @@ func TestExpiryPauseAndNoSecrets(t *testing.T) {
 	f := testutil.New(t, "100")
 	ctx := context.Background()
 	_, err := f.DB.DB.Exec(`UPDATE grants SET ends_at_ms=?`, time.Now().Add(-time.Second).UnixMilli())
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	d, err := f.DB.Authorize(ctx, f.Request)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	if d.Status != 403 {
 		t.Fatal(d)
 	}
 	_, err = f.DB.DB.Exec(`UPDATE grants SET ends_at_ms=NULL`)
-	testutil.Must(t, err)
-	testutil.Must(t, f.DB.SetStatus(ctx, "grant", f.Grant, "paused"))
+	require.NoError(t, err)
+	require.NoError(t, f.DB.SetStatus(ctx, "grant", f.Grant, "paused"))
 	d, err = f.DB.Authorize(ctx, f.Request)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	if d.Status != 403 {
 		t.Fatal(d)
 	}
 	keys, err := f.DB.List(ctx, "api-key", "")
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	b, err := json.Marshal(keys)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	if strings.Contains(string(b), f.Key) || strings.Contains(string(b), "secret_hash") {
 		t.Fatal("secret exposed in listing")
 	}
 	var hash []byte
-	testutil.Must(t, f.DB.DB.QueryRow(`SELECT secret_hash FROM api_keys`).Scan(&hash))
+	require.NoError(t, f.DB.DB.QueryRow(`SELECT secret_hash FROM api_keys`).Scan(&hash))
 	if len(hash) != 32 {
 		t.Fatal(len(hash))
 	}

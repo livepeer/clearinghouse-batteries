@@ -17,6 +17,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/livepeer/clearinghouse/internal/store"
 	"github.com/livepeer/clearinghouse/internal/testutil"
+	"github.com/stretchr/testify/require"
 )
 
 type rpcFixture struct {
@@ -97,13 +98,13 @@ func makeHeaders(from int, parent common.Hash, tag string, to int) []*types.Head
 func makeLog(t *testing.T, h *types.Header, nonce int64) types.Log {
 	t.Helper()
 	data, err := ticketABI.Events["WinningTicketRedeemed"].Inputs.NonIndexed().Pack(big.NewInt(500), big.NewInt(1), big.NewInt(nonce), big.NewInt(1), []byte{1, 2, 3})
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	return types.Log{Address: common.HexToAddress(testutil.Contract), Topics: []common.Hash{EventID, common.BytesToHash(common.HexToAddress(testutil.Sender).Bytes()), common.BytesToHash(common.HexToAddress(testutil.Orch).Bytes())}, Data: data, BlockNumber: h.Number.Uint64(), BlockHash: h.Hash(), TxHash: common.BigToHash(big.NewInt(nonce)), Index: uint(nonce*10 + 1)}
 }
 func makeTransfer(t *testing.T, h *types.Header, nonce, amount int64) types.Log {
 	t.Helper()
 	data, err := ticketABI.Events["WinningTicketTransfer"].Inputs.NonIndexed().Pack(big.NewInt(amount))
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	return types.Log{Address: common.HexToAddress(testutil.Contract), Topics: []common.Hash{WinningTicketTransferID, common.BytesToHash(common.HexToAddress(testutil.Sender).Bytes()), common.BytesToHash(common.HexToAddress(testutil.Orch).Bytes())}, Data: data, BlockNumber: h.Number.Uint64(), BlockHash: h.Hash(), TxHash: common.BigToHash(big.NewInt(nonce)), Index: uint(nonce * 10)}
 }
 func makeRedemptionLogs(t *testing.T, h *types.Header, nonce int64) []types.Log {
@@ -113,14 +114,14 @@ func makeFundingLog(t *testing.T, h *types.Header, tx, index, amount int64, name
 	t.Helper()
 	event := ticketABI.Events[name]
 	data, err := event.Inputs.NonIndexed().Pack(big.NewInt(amount))
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	return types.Log{Address: common.HexToAddress(testutil.Contract), Topics: []common.Hash{event.ID, common.BytesToHash(common.HexToAddress(testutil.Sender).Bytes())}, Data: data, BlockNumber: h.Number.Uint64(), BlockHash: h.Hash(), TxHash: common.BigToHash(big.NewInt(tx)), Index: uint(index)}
 }
 func makeWithdrawalLog(t *testing.T, h *types.Header, tx, index, deposit, reserve int64) types.Log {
 	t.Helper()
 	event := ticketABI.Events["Withdrawal"]
 	data, err := event.Inputs.NonIndexed().Pack(big.NewInt(deposit), big.NewInt(reserve))
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	return types.Log{Address: common.HexToAddress(testutil.Contract), Topics: []common.Hash{event.ID, common.BytesToHash(common.HexToAddress(testutil.Sender).Bytes())}, Data: data, BlockNumber: h.Number.Uint64(), BlockHash: h.Hash(), TxHash: common.BigToHash(big.NewInt(tx)), Index: uint(index)}
 }
 func makePaymentLogs(t *testing.T, h *types.Header, tx, index, faceValue, paid, reservePaid int64) []types.Log {
@@ -129,20 +130,20 @@ func makePaymentLogs(t *testing.T, h *types.Header, tx, index, faceValue, paid, 
 	if reservePaid > 0 {
 		event := ticketABI.Events["ReserveClaimed"]
 		data, err := event.Inputs.NonIndexed().Pack(common.HexToAddress(testutil.Orch), big.NewInt(reservePaid))
-		testutil.Must(t, err)
+		require.NoError(t, err)
 		logs = append(logs, types.Log{Address: common.HexToAddress(testutil.Contract), Topics: []common.Hash{event.ID, common.BytesToHash(common.HexToAddress(testutil.Sender).Bytes())}, Data: data, BlockNumber: h.Number.Uint64(), BlockHash: h.Hash(), TxHash: common.BigToHash(big.NewInt(tx)), Index: uint(index)})
 		index++
 	}
 	if paid > 0 {
 		event := ticketABI.Events["WinningTicketTransfer"]
 		data, err := event.Inputs.NonIndexed().Pack(big.NewInt(paid))
-		testutil.Must(t, err)
+		require.NoError(t, err)
 		logs = append(logs, types.Log{Address: common.HexToAddress(testutil.Contract), Topics: []common.Hash{event.ID, common.BytesToHash(common.HexToAddress(testutil.Sender).Bytes()), common.BytesToHash(common.HexToAddress(testutil.Orch).Bytes())}, Data: data, BlockNumber: h.Number.Uint64(), BlockHash: h.Hash(), TxHash: common.BigToHash(big.NewInt(tx)), Index: uint(index)})
 		index++
 	}
 	event := ticketABI.Events["WinningTicketRedeemed"]
 	data, err := event.Inputs.NonIndexed().Pack(big.NewInt(faceValue), big.NewInt(1), big.NewInt(tx), big.NewInt(1), []byte{1, 2, 3})
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	logs = append(logs, types.Log{Address: common.HexToAddress(testutil.Contract), Topics: []common.Hash{event.ID, common.BytesToHash(common.HexToAddress(testutil.Sender).Bytes()), common.BytesToHash(common.HexToAddress(testutil.Orch).Bytes())}, Data: data, BlockNumber: h.Number.Uint64(), BlockHash: h.Hash(), TxHash: common.BigToHash(big.NewInt(tx)), Index: uint(index)})
 	return logs
 }
@@ -161,17 +162,17 @@ func TestRPCConfirmationDuplicateDelayedAttributionAndReorg(t *testing.T) {
 	log := makeLog(t, api.headers[3], 1)
 	api.logs = append([]types.Log{makeTransfer(t, api.headers[3], 1, 500), log, log}, makeRedemptionLogs(t, api.headers[6], 2)...)
 	progress, err := l.Step(ctx)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	if !progress {
 		t.Fatal("no progress")
 	}
 	next, _, _, err := f.DB.Checkpoint(ctx, "chain", l.Config.Stream())
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	if next != 5 {
 		t.Fatal(next)
 	}
 	rows, err := f.DB.List(ctx, "settlement", "")
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	if len(rows) != 1 || rows[0]["match_status"] != "unmatched" {
 		t.Fatal(rows)
 	}
@@ -185,19 +186,19 @@ func TestRPCConfirmationDuplicateDelayedAttributionAndReorg(t *testing.T) {
 		}
 	}
 	pm := crypto.Keccak256Hash(common.LeftPadBytes(big.NewInt(1).Bytes(), 32)).Hex()
-	testutil.Must(t, f.DB.Ingest(ctx, "test", 0, f.Event(t, "usage", "10", pm)))
+	require.NoError(t, f.DB.Ingest(ctx, "test", 0, f.Event(t, "usage", "10", pm)))
 	rows, err = f.DB.List(ctx, "settlement", "")
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	if rows[0]["match_status"] != "matched" || rows[0]["payment_session_id"] != f.Session || rows[0]["authorization_id"] != nil {
 		t.Fatal(rows)
 	}
 	bal, err := store.Balance(ctx, f.DB.DB, "allocation_available", f.Allocation)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	if bal.String() != "90" {
 		t.Fatal(bal)
 	}
 	bal, err = store.Balance(ctx, f.DB.DB, "treasury_settled_spend", "42161:"+testutil.Sender)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	if bal.String() != "500" {
 		t.Fatal(bal)
 	}
@@ -205,16 +206,16 @@ func TestRPCConfirmationDuplicateDelayedAttributionAndReorg(t *testing.T) {
 	api.headers = append(api.headers[:3], makeHeaders(3, api.headers[2].Hash(), "fork", 6)...)
 	api.logs = makeRedemptionLogs(t, api.headers[3], 3)
 	_, err = l.Step(ctx)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	_, err = l.Step(ctx)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	rows, err = f.DB.List(ctx, "settlement", "")
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	if len(rows) != 2 {
 		t.Fatal(rows)
 	}
 	bal, err = store.Balance(ctx, f.DB.DB, "treasury_settled_spend", "42161:"+testutil.Sender)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	if bal.String() != "500" {
 		t.Fatal(bal)
 	}
@@ -222,18 +223,18 @@ func TestRPCConfirmationDuplicateDelayedAttributionAndReorg(t *testing.T) {
 	api.headers = originalHeaders
 	api.logs = []types.Log{makeTransfer(t, api.headers[3], 1, 500), log}
 	_, err = l.Step(ctx)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	_, err = l.Step(ctx)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	_, err = l.Step(ctx)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	bal, err = store.Balance(ctx, f.DB.DB, "treasury_settled_spend", "42161:"+testutil.Sender)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	if bal.String() != "500" {
 		t.Fatal(bal)
 	}
 	var generation int
-	testutil.Must(t, f.DB.DB.QueryRow(`SELECT generation FROM settlements WHERE tx_hash=?`, strings.ToLower(log.TxHash.Hex())).Scan(&generation))
+	require.NoError(t, f.DB.DB.QueryRow(`SELECT generation FROM settlements WHERE tx_hash=?`, strings.ToLower(log.TxHash.Hex())).Scan(&generation))
 	if generation != 1 {
 		t.Fatal(generation)
 	}
@@ -244,22 +245,22 @@ func TestAmbiguousSessionsAndDeepReorg(t *testing.T) {
 	l, api := newListener(t, f)
 	ctx := context.Background()
 	pm := crypto.Keccak256Hash(common.LeftPadBytes(big.NewInt(1).Bytes(), 32)).Hex()
-	testutil.Must(t, f.DB.Ingest(ctx, "test", 0, f.Event(t, "first", "10", pm)))
+	require.NoError(t, f.DB.Ingest(ctx, "test", 0, f.Event(t, "first", "10", pm)))
 	req := f.Request
 	state := *req.State
 	state.StateID = "state-2"
 	req.State = &state
 	d, err := f.DB.Authorize(ctx, req)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	second := f.Event(t, "second", "10", pm)
 	second = bytes.ReplaceAll(second, []byte(f.Session), []byte(d.AuthID))
 	second = bytes.ReplaceAll(second, []byte("state-1"), []byte("state-2"))
-	testutil.Must(t, f.DB.Ingest(ctx, "test", 1, second))
+	require.NoError(t, f.DB.Ingest(ctx, "test", 1, second))
 	api.logs = makeRedemptionLogs(t, api.headers[3], 1)
 	_, err = l.Step(ctx)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	rows, err := f.DB.List(ctx, "settlement", "")
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	if rows[0]["match_status"] != "ambiguous" || rows[0]["payment_session_id"] != nil {
 		t.Fatal(rows)
 	}
@@ -270,7 +271,7 @@ func TestAmbiguousSessionsAndDeepReorg(t *testing.T) {
 		t.Fatal(err)
 	}
 	bal, err := store.Balance(ctx, f.DB.DB, "treasury_settled_spend", "42161:"+testutil.Sender)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	if bal.String() != "500" {
 		t.Fatal("changed ledger on deep reorg", bal)
 	}
@@ -282,12 +283,12 @@ func TestRPCFailureDoesNotAdvanceAndDefaultStart(t *testing.T) {
 	ctx := context.Background()
 	l.Config.Start = nil
 	progress, err := l.Step(ctx)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	if progress {
 		t.Fatal("unconfirmed current head reported progress")
 	}
 	next, hash, found, err := f.DB.Checkpoint(ctx, "chain", l.Config.Stream())
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	if !found || next != 6 || hash != strings.ToLower(api.headers[5].Hash().Hex()) {
 		t.Fatal(next, hash, found)
 	}
@@ -303,7 +304,7 @@ func TestRPCFailureDoesNotAdvanceAndDefaultStart(t *testing.T) {
 		t.Fatal("noncanonical log accepted")
 	}
 	next, _, _, err = f.DB.Checkpoint(ctx, "chain", l.Config.Stream())
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	if next != 1 {
 		t.Fatal(next)
 	}
@@ -314,14 +315,14 @@ func TestCheckpointTakesPrecedenceOverChangedStart(t *testing.T) {
 	l, _ := newListener(t, f)
 	ctx := context.Background()
 	_, err := l.Step(ctx)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 
 	changed := int64(0)
 	l.Config.Start = &changed
 	_, err = l.Step(ctx)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	next, _, found, err := f.DB.Checkpoint(ctx, "chain", l.Config.Stream())
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	if !found || next != 5 {
 		t.Fatal(next, found)
 	}
@@ -332,12 +333,12 @@ func TestResolveChainConfiguration(t *testing.T) {
 	l, api := newListener(t, f)
 	l.Config.ChainID = ""
 	l.Config.Contract = ""
-	testutil.Must(t, l.resolveConfig(context.Background()))
+	require.NoError(t, l.resolveConfig(context.Background()))
 	if l.Config.ChainID != "42161" || l.Config.Contract != testutil.Contract {
 		t.Fatal(l.Config)
 	}
 	wantData, err := controllerABI.Pack("getContract", crypto.Keccak256Hash([]byte("TicketBroker")))
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	if api.controllerCalls != 1 || !bytes.Equal(api.controllerData, wantData) {
 		t.Fatal(api.controllerCalls, api.controllerData)
 	}
@@ -357,7 +358,7 @@ func TestResolveChainConfiguration(t *testing.T) {
 	}
 
 	l.Config.Contract = testutil.Contract
-	testutil.Must(t, l.resolveConfig(context.Background()))
+	require.NoError(t, l.resolveConfig(context.Background()))
 	if api.controllerCalls != 0 {
 		t.Fatal("explicit TicketBroker override queried the Controller")
 	}
@@ -375,32 +376,32 @@ func TestEscrowFundingPartialRedemptionWithdrawalAndReporting(t *testing.T) {
 	originalLogs := append([]types.Log{}, api.logs...)
 	ctx := context.Background()
 	_, err := l.Step(ctx)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 
 	report, err := f.DB.EscrowReport(ctx)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	if len(report) != 1 || report[0]["deposit_balance_wei"] != "0" || report[0]["reserve_balance_wei"] != "0" || report[0]["total_balance_wei"] != "0" || report[0]["confirmed_through_block"] != "4" {
 		t.Fatal(report)
 	}
 	settlements, err := f.DB.List(ctx, "settlement", "")
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	if len(settlements) != 1 || settlements[0]["face_value_wei"] != "200" || settlements[0]["paid_amount_wei"] != "150" || settlements[0]["deposit_paid_wei"] != "110" || settlements[0]["reserve_paid_wei"] != "40" {
 		t.Fatal(settlements)
 	}
 	activity, err := f.DB.EscrowActivity(ctx)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	if len(activity) != 7 || activity[0]["event_type"] != "opening_snapshot" {
 		t.Fatal(activity)
 	}
 	for account, want := range map[string]string{"treasury_cash": "-150", "treasury_settled_spend": "150"} {
 		balance, err := store.Balance(ctx, f.DB.DB, account, "42161:"+testutil.Sender)
-		testutil.Must(t, err)
+		require.NoError(t, err)
 		if balance.String() != want {
 			t.Fatalf("%s=%s want %s", account, balance, want)
 		}
 	}
 	decision, err := f.DB.Authorize(ctx, f.Request)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	if decision.Status != 200 {
 		t.Fatal("empty escrow affected authorization", decision)
 	}
@@ -410,16 +411,16 @@ func TestEscrowFundingPartialRedemptionWithdrawalAndReporting(t *testing.T) {
 	api.headers = append(api.headers[:3], makeHeaders(3, api.headers[2].Hash(), "fork-escrow", 6)...)
 	api.logs = nil
 	_, err = l.Step(ctx)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	_, err = l.Step(ctx)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	report, err = f.DB.EscrowReport(ctx)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	if report[0]["deposit_balance_wei"] != "110" || report[0]["reserve_balance_wei"] != "70" {
 		t.Fatal(report)
 	}
 	spend, err := store.Balance(ctx, f.DB.DB, "treasury_settled_spend", "42161:"+testutil.Sender)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	if spend.Sign() != 0 {
 		t.Fatal(spend)
 	}
@@ -427,16 +428,16 @@ func TestEscrowFundingPartialRedemptionWithdrawalAndReporting(t *testing.T) {
 	// Re-canonicalizing the original blocks reposts each movement once.
 	api.headers, api.logs = originalHeaders, originalLogs
 	_, err = l.Step(ctx)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	_, err = l.Step(ctx)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	report, err = f.DB.EscrowReport(ctx)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	if report[0]["deposit_balance_wei"] != "0" || report[0]["reserve_balance_wei"] != "0" {
 		t.Fatal(report)
 	}
 	spend, err = store.Balance(ctx, f.DB.DB, "treasury_settled_spend", "42161:"+testutil.Sender)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	if spend.String() != "150" {
 		t.Fatal(spend)
 	}
@@ -453,9 +454,9 @@ func TestGenesisAndPredeploymentOpeningSnapshots(t *testing.T) {
 				api.emptyCall = true
 			}
 			_, err := l.Step(context.Background())
-			testutil.Must(t, err)
+			require.NoError(t, err)
 			report, err := f.DB.EscrowReport(context.Background())
-			testutil.Must(t, err)
+			require.NoError(t, err)
 			if len(report) != 2 || report[0]["total_balance_wei"] != "0" || report[1]["total_balance_wei"] != "0" {
 				t.Fatal(report)
 			}
@@ -472,10 +473,10 @@ func TestEscrowFundingReorgAndReplay(t *testing.T) {
 	funding := makeFundingLog(t, api.headers[3], 30, 30, 50, "DepositFunded")
 	api.logs = []types.Log{funding}
 	_, err := l.Step(ctx)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	assertDeposit := func(want string) {
 		report, err := f.DB.EscrowReport(ctx)
-		testutil.Must(t, err)
+		require.NoError(t, err)
 		if report[0]["deposit_balance_wei"] != want {
 			t.Fatalf("deposit=%s want %s", report[0]["deposit_balance_wei"], want)
 		}
@@ -484,19 +485,19 @@ func TestEscrowFundingReorgAndReplay(t *testing.T) {
 	api.headers = append(api.headers[:3], makeHeaders(3, api.headers[2].Hash(), "fork-funding", 6)...)
 	api.logs = nil
 	_, err = l.Step(ctx)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	_, err = l.Step(ctx)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	assertDeposit("100")
 	api.headers = originalHeaders
 	api.logs = []types.Log{funding}
 	_, err = l.Step(ctx)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	_, err = l.Step(ctx)
-	testutil.Must(t, err)
+	require.NoError(t, err)
 	assertDeposit("150")
 	var generation int
-	testutil.Must(t, f.DB.DB.QueryRow(`SELECT generation FROM ticket_broker_events WHERE tx_hash=?`, strings.ToLower(funding.TxHash.Hex())).Scan(&generation))
+	require.NoError(t, f.DB.DB.QueryRow(`SELECT generation FROM ticket_broker_events WHERE tx_hash=?`, strings.ToLower(funding.TxHash.Hex())).Scan(&generation))
 	if generation != 1 {
 		t.Fatal(generation)
 	}
@@ -527,7 +528,7 @@ func TestInvalidPaymentSequencesDoNotAdvance(t *testing.T) {
 				t.Fatal("invalid payment accepted")
 			}
 			next, _, found, err := f.DB.Checkpoint(context.Background(), "chain", l.Config.Stream())
-			testutil.Must(t, err)
+			require.NoError(t, err)
 			if !found || next != 1 {
 				t.Fatal(next, found)
 			}
