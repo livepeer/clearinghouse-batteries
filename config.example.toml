@@ -27,7 +27,7 @@ KafkaDataDir = "clearinghouse-kafka"
 # StartBlock = 123456789   # Omit to start a new database at the current head.
 Confirmations = 64
 
-# Durations in configuration files are integer nanoseconds (5 seconds here).
-PollInterval = 5000000000
+# Durations use Go duration syntax.
+PollInterval = "5s"
 BlockBatchSize = 2000
 ReorgLookback = 256

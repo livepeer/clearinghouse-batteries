@@ -7,11 +7,11 @@ import (
 	"io"
 	"time"
 
-	"github.com/GiGurra/boa/pkg/boa"
+	"github.com/BurntSushi/toml"
+	"github.com/j0sh/boa/pkg/boa"
 	"github.com/livepeer/clearinghouse/internal/store"
 	"github.com/livepeer/clearinghouse/internal/units"
 	"github.com/livepeer/clearinghouse/migrations"
-	"github.com/pelletier/go-toml/v2"
 	"github.com/spf13/cobra"
 )
 
@@ -53,7 +53,7 @@ type KeyParams struct {
 }
 
 func command[T any](use, short string, fn func(*T, *cobra.Command) error) *cobra.Command {
-	return boa.CmdT[T]{Use: use, Short: short, PreValidateFunc: func(p *T, c *cobra.Command, args []string) error {
+	return boa.Cmd[T]{Use: use, Short: short, PreValidateFunc: func(p *T, c *cobra.Command, args []string) error {
 		// Config decoding can reuse a slice's backing array, which would mutate
 		// boa's saved CLI/environment value before it reapplies precedence.
 		if serve, ok := any(p).(*ServeParams); ok {

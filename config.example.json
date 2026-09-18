@@ -9,7 +9,7 @@
   "KafkaTopic": "livepeer-signing",
   "KafkaDataDir": "clearinghouse-kafka",
   "Confirmations": 64,
-  "PollInterval": 5000000000,
+  "PollInterval": "5s",
   "BlockBatchSize": 2000,
   "ReorgLookback": 256
 }
