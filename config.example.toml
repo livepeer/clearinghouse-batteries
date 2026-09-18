@@ -13,7 +13,6 @@ HTTPBind = "127.0.0.1:8080"
 # The embedded Kafka broker should listen only on a trusted loopback or private network.
 KafkaBind = "127.0.0.1:9092"
 KafkaTopic = "livepeer-signing"
-KafkaDataDir = "clearinghouse-kafka"
 
 # For external plaintext Kafka, set EnableKafka = false, keep EnableAccounting = true,
 # and provide bootstrap addresses. Do not use KafkaBrokers with embedded Kafka.

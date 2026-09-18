@@ -30,7 +30,10 @@ func OpenBroker(ctx context.Context, bind, topic, dir string) (*minikafka.Broker
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
 	}
-	backend, err := sqlite.Open(filepath.Join(dir, "broker.db"), sqlite.WithWAL(true), sqlite.WithSynchronous(sqlite.SyncFull), sqlite.WithBusyTimeout(5*time.Second))
+	// A trailing separator tells minikafka this is a directory even when the
+	// final path component is "." or contains a dot.
+	root := filepath.Clean(dir) + string(os.PathSeparator)
+	backend, err := sqlite.Open(root, sqlite.WithWAL(true), sqlite.WithSynchronous(sqlite.SyncFull), sqlite.WithBusyTimeout(5*time.Second))
 	if err != nil {
 		return nil, err
 	}

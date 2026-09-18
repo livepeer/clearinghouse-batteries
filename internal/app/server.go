@@ -40,7 +40,6 @@ type ServeParams struct {
 	WebhookToken          string        `optional:"true" env:"CLEARINGHOUSE_WEBHOOK_TOKEN" descr:"Signer-to-clearinghouse shared token"`
 	KafkaBind             string        `default:"127.0.0.1:9092" env:"CLEARINGHOUSE_KAFKA_BIND"`
 	KafkaTopic            string        `default:"livepeer-signing" env:"CLEARINGHOUSE_KAFKA_TOPIC"`
-	KafkaDataDir          string        `default:"clearinghouse-kafka" env:"CLEARINGHOUSE_KAFKA_DATA_DIR"`
 	RPCURL                string        `name:"rpc-url" optional:"true" env:"CLEARINGHOUSE_RPC_URL"`
 	ChainID               string        `name:"chain-id" optional:"true" env:"CLEARINGHOUSE_CHAIN_ID" descr:"Optional assertion for the RPC chain ID"`
 	TicketBroker          string        `name:"ticket-broker" optional:"true" env:"CLEARINGHOUSE_TICKET_BROKER" descr:"TicketBroker override; resolved automatically on Arbitrum One"`
@@ -98,9 +97,6 @@ func (p ServeParams) Validate() error {
 		if ip == nil || (!ip.IsLoopback() && !ip.IsPrivate()) {
 			return errors.New("Kafka bind must be a concrete loopback or private IP (no public or wildcard bind)")
 		}
-		if p.KafkaDataDir == "" {
-			return errors.New("Kafka data directory required")
-		}
 	}
 	if p.EnableOnchainListener {
 		if p.RPCURL == "" {
@@ -136,7 +132,7 @@ func Serve(ctx context.Context, p ServeParams) error {
 	for _, enabled := range []struct {
 		on   bool
 		path string
-	}{{p.EnableAccounting, p.DBPath + ".accounting.lock"}, {p.EnableOnchainListener, p.DBPath + ".chain.lock"}, {p.EnableKafka, filepath.Join(p.KafkaDataDir, "broker.lock")}} {
+	}{{p.EnableAccounting, p.DBPath + ".accounting.lock"}, {p.EnableOnchainListener, p.DBPath + ".chain.lock"}, {p.EnableKafka, filepath.Join(filepath.Dir(p.DBPath), "minikafka_broker.lock")}} {
 		if !enabled.on {
 			continue
 		}
@@ -150,7 +146,7 @@ func Serve(ctx context.Context, p ServeParams) error {
 	brokers := p.KafkaBrokers
 	if p.EnableKafka {
 		var err error
-		broker, err = kafka.OpenBroker(ctx, p.KafkaBind, p.KafkaTopic, p.KafkaDataDir)
+		broker, err = kafka.OpenBroker(ctx, p.KafkaBind, p.KafkaTopic, filepath.Dir(p.DBPath))
 		if err != nil {
 			return err
 		}

@@ -192,7 +192,6 @@ func benchmarkSteadyState(b *testing.B, layout benchmarkLayout, workers int) {
 		WebhookToken:          benchmarkWebhookToken,
 		KafkaBind:             kafkaAddr,
 		KafkaTopic:            benchmarkTopic,
-		KafkaDataDir:          filepath.Join(dir, "kafka"),
 		RPCURL:                rpcHTTP.URL,
 		ChainID:               "42161",
 		TicketBroker:          testutil.Contract,

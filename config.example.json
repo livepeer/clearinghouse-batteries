@@ -7,7 +7,6 @@
   "HTTPBind": "127.0.0.1:8080",
   "KafkaBind": "127.0.0.1:9092",
   "KafkaTopic": "livepeer-signing",
-  "KafkaDataDir": "clearinghouse-kafka",
   "Confirmations": 64,
   "PollInterval": "5s",
   "BlockBatchSize": 2000,

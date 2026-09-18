@@ -45,6 +45,8 @@ func TestRealBrokerRestartAndReplay(t *testing.T) {
 		}
 	}
 	l, stop := start()
+	require.FileExists(t, filepath.Join(dir, "minikafka_+meta.db"))
+	require.FileExists(t, filepath.Join(dir, "minikafka_events.db"))
 	raw := f.Event(t, "one", "70", testutil.PM)
 	// Match the writer configuration used by go-livepeer's monitor producer.
 	produce := func(l *Listener, values ...[]byte) {
@@ -76,6 +78,24 @@ func TestRealBrokerRestartAndReplay(t *testing.T) {
 	if count != 2 {
 		t.Fatal(count)
 	}
+}
+
+func TestBrokerUsesDirectoryPathVerbatim(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data.v1")
+	broker, err := OpenBroker(context.Background(), "127.0.0.1:0", "events", dir)
+	require.NoError(t, err)
+	require.NoError(t, broker.Close())
+	require.FileExists(t, filepath.Join(dir, "minikafka_+meta.db"))
+	require.FileExists(t, filepath.Join(dir, "minikafka_events.db"))
+}
+
+func TestBrokerUsesCurrentDirectory(t *testing.T) {
+	t.Chdir(t.TempDir())
+	broker, err := OpenBroker(context.Background(), "127.0.0.1:0", "events", ".")
+	require.NoError(t, err)
+	require.NoError(t, broker.Close())
+	require.FileExists(t, "minikafka_+meta.db")
+	require.FileExists(t, "minikafka_events.db")
 }
 
 func TestBrokerConcurrentPublishAndShutdown(t *testing.T) {

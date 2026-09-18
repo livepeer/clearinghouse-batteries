@@ -246,7 +246,7 @@ func TestAllComponentCombinations(t *testing.T) {
 		t.Run(fmt.Sprint(mask), func(t *testing.T) {
 			dir := t.TempDir()
 			start := int64(0)
-			p := ServeParams{Common: Common{DBPath: filepath.Join(dir, "accounts.db")}, EnableAuthWebhook: mask&1 != 0, EnableKafka: mask&2 != 0, EnableOnchainListener: mask&4 != 0, HTTPBind: testutil.Port(t), WebhookToken: "test-token", KafkaBind: testutil.Port(t), KafkaTopic: "events", KafkaDataDir: filepath.Join(dir, "kafka"), RPCURL: srv.URL, ChainID: "42161", TicketBroker: testutil.Contract, SignerAddresses: []string{testutil.Sender}, StartBlock: &start, Confirmations: 0, BlockBatchSize: 10, ReorgLookback: 4, PollInterval: 10 * time.Millisecond}
+			p := ServeParams{Common: Common{DBPath: filepath.Join(dir, "accounts.db")}, EnableAuthWebhook: mask&1 != 0, EnableKafka: mask&2 != 0, EnableOnchainListener: mask&4 != 0, HTTPBind: testutil.Port(t), WebhookToken: "test-token", KafkaBind: testutil.Port(t), KafkaTopic: "events", RPCURL: srv.URL, ChainID: "42161", TicketBroker: testutil.Contract, SignerAddresses: []string{testutil.Sender}, StartBlock: &start, Confirmations: 0, BlockBatchSize: 10, ReorgLookback: 4, PollInterval: 10 * time.Millisecond}
 			p.EnableAccounting = mask&8 != 0
 			producerAddr := p.KafkaBind
 			if p.EnableAccounting && !p.EnableKafka {
@@ -331,8 +331,16 @@ func TestAllComponentCombinations(t *testing.T) {
 					t.Fatalf("consumer did not create accounting lock: %v", err)
 				}
 				if !p.EnableKafka {
-					if _, err := os.Stat(p.KafkaDataDir); !os.IsNotExist(err) {
-						t.Fatalf("external consumer created embedded broker storage: %v", err)
+					matches, err := filepath.Glob(filepath.Join(dir, "minikafka_*.db"))
+					if err != nil || len(matches) != 0 {
+						t.Fatalf("external consumer created embedded broker storage: %v, %v", matches, err)
+					}
+				}
+			}
+			if p.EnableKafka {
+				for _, name := range []string{"minikafka_+meta.db", "minikafka_events.db"} {
+					if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+						t.Fatalf("embedded broker database is not beside accounting database: %s: %v", name, err)
 					}
 				}
 			}
