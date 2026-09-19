@@ -181,7 +181,7 @@ func TestBoaConfigEnvironmentValidationAndHelp(t *testing.T) {
 			t.Fatalf("direct secret flag exposed in help: %s", line)
 		}
 	}
-	for _, want := range []string{"\nEnvironment Variables:\n", "\n  CLEARINGHOUSE_WEBHOOK_TOKEN  Signer-to-clearinghouse shared token\n", "\n  CLEARINGHOUSE_RPC_URL\n"} {
+	for _, want := range []string{"\nEnvironment Variables:\n", "\n  CLEARINGHOUSE_WEBHOOK_TOKEN  Signer-to-clearinghouse shared token\n", "\n  CLEARINGHOUSE_RPC_URL        On-chain RPC URL\n"} {
 		if !strings.Contains(help, want) {
 			t.Fatalf("secret environment help missing %q", want)
 		}

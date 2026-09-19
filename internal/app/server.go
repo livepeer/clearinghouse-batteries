@@ -25,7 +25,7 @@ import (
 
 type Common struct {
 	DBPath     string `name:"db-path" default:"clearinghouse.db" descr:"Accounting SQLite file"`
-	ConfigFile string `optional:"true" descr:"Configuration file"`
+	ConfigFile string `optional:"true" file:"true" descr:"Configuration file"`
 }
 
 func (p Common) configPath() string { return p.ConfigFile }
@@ -62,18 +62,18 @@ type ServeParams struct {
 	EnableOnchainListener bool          `optional:"true" descr:"Run on-chain RPC listener"`
 	WebhookToken          string        `optional:"true" secret:"true" descr:"Signer-to-clearinghouse shared token"`
 	WebhookTokenFile      string        `secretfor:"WebhookToken" descr:"File containing the signer-to-clearinghouse shared token"`
-	KafkaBind             string        `default:"127.0.0.1:9092"`
-	KafkaTopic            string        `default:"livepeer-signing"`
-	RPCURL                string        `name:"rpc-url" optional:"true" secret:"true"`
+	KafkaBind             string        `default:"127.0.0.1:9092" descr:"Embedded broker IP:port (loopback or private)"`
+	KafkaTopic            string        `default:"livepeer-signing" descr:"Kafka topic for issued tickets"`
+	RPCURL                string        `name:"rpc-url" optional:"true" secret:"true" descr:"On-chain RPC URL"`
 	RPCURLFile            string        `name:"rpc-url-file" secretfor:"RPCURL" descr:"File containing the on-chain RPC URL"`
 	ChainID               string        `name:"chain-id" optional:"true" descr:"Optional assertion for the RPC chain ID"`
 	TicketBroker          string        `name:"ticket-broker" optional:"true" descr:"TicketBroker override; resolved automatically on Arbitrum One"`
-	SignerAddresses       []string      `optional:"true"`
+	SignerAddresses       []string      `optional:"true" descr:"Signer addresses, comma-separated (required for on-chain listener)"`
 	StartBlock            *int64        `optional:"true" descr:"First block for a new chain checkpoint; defaults to the current head"`
-	Confirmations         int64         `default:"64"`
-	PollInterval          time.Duration `default:"5s"`
-	BlockBatchSize        int64         `default:"2000"`
-	ReorgLookback         int64         `default:"256"`
+	Confirmations         int64         `default:"64" descr:"Blocks to wait before processing on-chain events"`
+	PollInterval          time.Duration `default:"5s" descr:"On-chain listener polling interval"`
+	BlockBatchSize        int64         `default:"2000" descr:"Maximum blocks per on-chain scan"`
+	ReorgLookback         int64         `default:"256" descr:"Maximum blocks to search for a common ancestor after a reorg"`
 }
 
 func (p ServeParams) chainConfig() chain.Config {

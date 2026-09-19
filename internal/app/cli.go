@@ -35,22 +35,22 @@ type FundParams struct {
 }
 type CreateParams struct {
 	Common
-	Name        string
+	Name        string `descr:"Grant or allocation name"`
 	AmountETH   string `default:"0" descr:"Initial ETH funding (allocations also accept 'all')"`
-	Sponsor     string `optional:"true"`
-	Beneficiary string `optional:"true"`
-	GrantID     string `optional:"true"`
+	Sponsor     string `optional:"true" descr:"Grant sponsor label"`
+	Beneficiary string `optional:"true" descr:"Allocation beneficiary label"`
+	GrantID     string `optional:"true" descr:"Parent grant ID (required for allocations)"`
 	Status      string `optional:"true" descr:"Initial status"`
-	Metadata    string `default:"{}"`
+	Metadata    string `default:"{}" descr:"JSON metadata"`
 	StartsAt    string `optional:"true" descr:"RFC3339 start time"`
 	EndsAt      string `optional:"true" descr:"RFC3339 end time"`
 }
 type KeyParams struct {
 	Common
-	AllocationID string `optional:"true"`
-	GrantID      string `optional:"true"`
-	Name         string
-	AmountETH    string `optional:"true" descr:"Required ETH funding with --grant-id; accepts 'all'"`
+	AllocationID string `optional:"true" descr:"Existing allocation ID"`
+	GrantID      string `optional:"true" descr:"Grant ID for a new allocation"`
+	Name         string `descr:"API key name (also names new allocations)"`
+	AmountETH    string `optional:"true" descr:"Funding in ETH; 'all' uses the grant's unallocated balance"`
 }
 
 func command[T any](use, short string, fn func(*T, *cobra.Command) error, enrich ...boa.ParamEnricher) *cobra.Command {
@@ -138,7 +138,7 @@ func Root(out, errOut io.Writer) *cobra.Command {
 		root.AddCommand(group)
 	}
 	keys := &cobra.Command{Use: "api-key", Short: "Manage grant API keys"}
-	keys.AddCommand(command[KeyParams]("create", "Create a key; the secret is shown once", func(p *KeyParams, c *cobra.Command) error {
+	createKey := command[KeyParams]("create", "Create a key; the secret is shown once", func(p *KeyParams, c *cobra.Command) error {
 		if (p.AllocationID == "") == (p.GrantID == "") {
 			return errors.New("specify exactly one of --allocation-id or --grant-id")
 		}
@@ -160,7 +160,12 @@ func Root(out, errOut io.Writer) *cobra.Command {
 			allocation, id, key, err := db.CreateKeyForGrant(c.Context(), p.GrantID, p.Name, amount)
 			return map[string]string{"allocation_id": allocation, "id": id, "api_key": key}, err
 		})
-	}))
+	})
+	createKey.Long = `Create a key; the secret is shown once.
+
+Specify exactly one of --allocation-id and --grant-id.
+--amount-eth is required with --grant-id and cannot be used with --allocation-id.`
+	keys.AddCommand(createKey)
 	keys.AddCommand(listCommand("api-key"))
 	addRevoke(keys, "api-key")
 	root.AddCommand(keys)
@@ -189,7 +194,11 @@ func Root(out, errOut io.Writer) *cobra.Command {
 	root.AddCommand(ledger)
 	migrate := &cobra.Command{Use: "migrate", Short: "Manage embedded SQL migrations (down destroys accounting data)"}
 	for _, action := range []string{"up", "down", "status"} {
-		migrate.AddCommand(command[ListParams](action, "Migration "+action, func(p *ListParams, c *cobra.Command) error {
+		short := "Migration " + action
+		if action == "down" {
+			short = "Roll back the latest migration; destroys accounting data"
+		}
+		migrate.AddCommand(command[ListParams](action, short, func(p *ListParams, c *cobra.Command) error {
 			// Up may create a database. Down/status must not auto-apply missing migrations.
 			return withDB(c, p.Common, action == "up", func(db *store.Store) (any, error) {
 				if action == "down" {
