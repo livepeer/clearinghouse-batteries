@@ -32,6 +32,7 @@ import (
 
 const (
 	benchmarkTicketsPerBatch = 100
+	benchmarkWarmupEvents    = 1
 	benchmarkAllocationWei   = "1000000000000000000000000000000"
 	benchmarkTopic           = "benchmark-signing"
 	benchmarkWebhookToken    = "benchmark-webhook-token"
@@ -267,6 +268,18 @@ func benchmarkSteadyState(b *testing.B, layout benchmarkLayout, workers int) {
 			_ = writer.Close()
 		}
 	}()
+	warmupCtx, cancelWarmup := context.WithTimeout(ctx, 15*time.Second)
+	err = writer.WriteMessages(warmupCtx, kgo.Message{Value: []byte(`{"id":"benchmark-warmup","type":"other","data":{}}`)})
+	if err == nil {
+		err = waitBenchmark(warmupCtx, func() (bool, error) {
+			next, _, found, checkpointErr := observer.Checkpoint(warmupCtx, "kafka", benchmarkTopic)
+			return found && next == benchmarkWarmupEvents, checkpointErr
+		})
+	}
+	cancelWarmup()
+	if err != nil {
+		b.Fatal(err)
+	}
 
 	workCtx, cancelWork := context.WithCancel(ctx)
 	defer cancelWork()
@@ -322,7 +335,7 @@ func benchmarkSteadyState(b *testing.B, layout benchmarkLayout, workers int) {
 		if checkpointErr != nil {
 			return false, checkpointErr
 		}
-		return kafkaFound && kafkaNext == int64(totalTickets) && chainFound && chainNext == int64(b.N+1), nil
+		return kafkaFound && kafkaNext == int64(totalTickets+benchmarkWarmupEvents) && chainFound && chainNext == int64(b.N+1), nil
 	})
 	cancelDrain()
 	b.StopTimer()
@@ -556,7 +569,7 @@ func verifySteadyStateBenchmark(ctx context.Context, db *store.Store, layout ben
 	if err := db.DB.QueryRowContext(ctx, `SELECT count(*) FROM signing_authorizations`).Scan(&authorizations); err != nil {
 		return err
 	}
-	if usage != tickets || applied != tickets || authorizations != tickets {
+	if usage != tickets+benchmarkWarmupEvents || applied != tickets || authorizations != tickets {
 		return fmt.Errorf("ticket persistence mismatch: usage=%d applied=%d authorizations=%d want=%d", usage, applied, authorizations, tickets)
 	}
 	var settlements, matched int
@@ -574,7 +587,7 @@ func verifySteadyStateBenchmark(ctx context.Context, db *store.Store, layout ben
 	if err != nil {
 		return err
 	}
-	if !kafkaFound || kafkaNext != int64(tickets) || !chainFound || chainNext != int64(redemptions+1) {
+	if !kafkaFound || kafkaNext != int64(tickets+benchmarkWarmupEvents) || !chainFound || chainNext != int64(redemptions+1) {
 		return fmt.Errorf("checkpoint mismatch: kafka=%d chain=%d", kafkaNext, chainNext)
 	}
 	initial := mustBenchmarkAmount()

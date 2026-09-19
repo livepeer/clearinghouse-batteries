@@ -159,21 +159,11 @@ func Serve(ctx context.Context, p ServeParams) error {
 	count := 0
 	start := func(fn func(context.Context) error) { count++; go func() { done <- fn(ctx) }() }
 	if p.EnableAuthWebhook {
-		mux := http.NewServeMux()
-		mux.Handle("POST /v1/signer/authorize", auth.Handler(db, p.WebhookToken))
-		mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
-		mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
-			if ctx.Err() != nil || (p.EnableAccounting && !k.Ready.Load()) || (p.EnableOnchainListener && !c.Ready.Load()) || db.DB.PingContext(r.Context()) != nil {
-				http.Error(w, "not ready", 503)
-				return
-			}
-			w.WriteHeader(200)
-		})
 		ln, err := net.Listen("tcp", p.HTTPBind)
 		if err != nil {
 			return err
 		}
-		srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
+		srv := &http.Server{Handler: authWebhookHandler(ctx, db, p.WebhookToken), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 		start(func(ctx context.Context) error {
 			shutdownDone := make(chan struct{})
 			go func() {
@@ -221,6 +211,20 @@ func Serve(ctx context.Context, p ServeParams) error {
 		return nil
 	}
 	return result
+}
+
+func authWebhookHandler(ctx context.Context, db *store.Store, token string) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("POST /v1/signer/authorize", auth.Handler(db, token))
+	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+		if ctx.Err() != nil || db.DB.PingContext(r.Context()) != nil {
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	return mux
 }
 
 func lock(path string) (*os.File, error) {
