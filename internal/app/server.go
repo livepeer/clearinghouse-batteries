@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -29,14 +30,36 @@ type Common struct {
 
 func (p Common) configPath() string { return p.ConfigFile }
 
+type HTTPBind struct{ netip.AddrPort }
+
+func (b *HTTPBind) UnmarshalText(text []byte) error {
+	raw := string(text)
+	if raw == "" {
+		b.AddrPort = netip.AddrPort{}
+		return nil
+	}
+	if strings.HasPrefix(raw, ":") {
+		raw = "127.0.0.1" + raw
+	}
+	addr, err := netip.ParseAddrPort(raw)
+	if err != nil {
+		return err
+	}
+	if addr.Port() == 0 {
+		return errors.New("TCP port must be between 1 and 65535")
+	}
+	b.AddrPort = addr
+	return nil
+}
+
 type ServeParams struct {
 	Common
-	EnableAuthWebhook     bool          `optional:"true" env:"CLEARINGHOUSE_ENABLE_AUTH_WEBHOOK" descr:"Run signer authorization HTTP server"`
+	EnableAuthWebhook     HTTPBind      `optional:"true" env:"CLEARINGHOUSE_ENABLE_AUTH_WEBHOOK" descr:"Run signer authorization HTTP server on IP:port; :port binds to 127.0.0.1"`
+	UnsafeHTTPBind        bool          `name:"unsafe-http-bind" optional:"true" env:"CLEARINGHOUSE_UNSAFE_HTTP_BIND" descr:"Allow the auth webhook to bind to a non-loopback IP"`
 	EnableKafka           bool          `optional:"true" env:"CLEARINGHOUSE_ENABLE_KAFKA" descr:"Run embedded Kafka broker"`
 	EnableAccounting      bool          `optional:"true" env:"CLEARINGHOUSE_ENABLE_ACCOUNTING" descr:"Run accounting service"`
 	KafkaBrokers          []string      `optional:"true" env:"CLEARINGHOUSE_KAFKA_BROKERS" descr:"External Kafka bootstrap addresses (host:port)"`
 	EnableOnchainListener bool          `optional:"true" env:"CLEARINGHOUSE_ENABLE_ONCHAIN_LISTENER" descr:"Run on-chain RPC listener"`
-	HTTPBind              string        `name:"http-bind" default:"127.0.0.1:8080" env:"CLEARINGHOUSE_HTTP_BIND"`
 	WebhookToken          string        `optional:"true" env:"CLEARINGHOUSE_WEBHOOK_TOKEN" descr:"Signer-to-clearinghouse shared token"`
 	KafkaBind             string        `default:"127.0.0.1:9092" env:"CLEARINGHOUSE_KAFKA_BIND"`
 	KafkaTopic            string        `default:"livepeer-signing" env:"CLEARINGHOUSE_KAFKA_TOPIC"`
@@ -54,8 +77,10 @@ type ServeParams struct {
 func (p ServeParams) chainConfig() chain.Config {
 	return chain.Config{URL: p.RPCURL, ChainID: p.ChainID, Contract: p.TicketBroker, Senders: p.SignerAddresses, Start: p.StartBlock, Confirmations: p.Confirmations, Poll: p.PollInterval, BatchSize: p.BlockBatchSize, Lookback: p.ReorgLookback}
 }
+
 func (p ServeParams) Validate() error {
-	if !p.EnableAuthWebhook && !p.EnableKafka && !p.EnableAccounting && !p.EnableOnchainListener {
+	webhookEnabled := p.EnableAuthWebhook.IsValid()
+	if !webhookEnabled && !p.EnableKafka && !p.EnableAccounting && !p.EnableOnchainListener {
 		return errors.New("enable at least one of --enable-auth-webhook, --enable-kafka, --enable-accounting, --enable-onchain-listener")
 	}
 	if p.EnableKafka && len(p.KafkaBrokers) > 0 {
@@ -76,9 +101,9 @@ func (p ServeParams) Validate() error {
 			return errors.New("invalid Kafka topic")
 		}
 	}
-	if p.EnableAuthWebhook {
-		if _, _, err := net.SplitHostPort(p.HTTPBind); err != nil {
-			return fmt.Errorf("http bind: %w", err)
+	if webhookEnabled {
+		if !p.EnableAuthWebhook.Addr().IsLoopback() && !p.UnsafeHTTPBind {
+			return errors.New("auth webhook bind must be a loopback IP; use --unsafe-http-bind to allow a non-loopback address")
 		}
 		if p.WebhookToken == "" {
 			return errors.New("--webhook-token is required for the auth webhook")
@@ -111,8 +136,12 @@ func Serve(ctx context.Context, p ServeParams) error {
 	if err := p.Validate(); err != nil {
 		return err
 	}
+	webhookBind := ""
+	if p.EnableAuthWebhook.IsValid() {
+		webhookBind = p.EnableAuthWebhook.String()
+	}
 	var db *store.Store
-	if p.EnableAuthWebhook || p.EnableAccounting || p.EnableOnchainListener {
+	if webhookBind != "" || p.EnableAccounting || p.EnableOnchainListener {
 		var err error
 		db, err = store.Open(ctx, p.DBPath, true)
 		if err != nil {
@@ -158,8 +187,8 @@ func Serve(ctx context.Context, p ServeParams) error {
 	done := make(chan error, 4)
 	count := 0
 	start := func(fn func(context.Context) error) { count++; go func() { done <- fn(ctx) }() }
-	if p.EnableAuthWebhook {
-		ln, err := net.Listen("tcp", p.HTTPBind)
+	if webhookBind != "" {
+		ln, err := net.Listen("tcp", webhookBind)
 		if err != nil {
 			return err
 		}

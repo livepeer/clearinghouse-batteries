@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -30,6 +31,14 @@ func cli(t *testing.T, args ...string) string {
 	require.NoError(t, Execute(context.Background(), args, &out, &stderr))
 	return out.String()
 }
+
+func mustHTTPBind(t testing.TB, value string) HTTPBind {
+	t.Helper()
+	var bind HTTPBind
+	require.NoError(t, bind.UnmarshalText([]byte(value)))
+	return bind
+}
+
 func object(t *testing.T, s string) map[string]string {
 	t.Helper()
 	var m map[string]string
@@ -134,20 +143,28 @@ func TestBoaConfigEnvironmentValidationAndHelp(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "configured.db")); !os.IsNotExist(err) {
 		t.Fatal("environment did not override config")
 	}
-	for _, args := range [][]string{{"serve"}, {"grant", "create"}, {"serve", "--enable-auth-webhook", "--http-bind", "0.0.0.0:8080"}, {"serve", "--enable-kafka", "--kafka-bind", "0.0.0.0:9092"}, {"serve", "--enable-onchain-listener"}} {
+	for _, args := range [][]string{{"serve"}, {"grant", "create"}, {"serve", "--enable-auth-webhook"}, {"serve", "--http-bind", "127.0.0.1:8080"}, {"serve", "--enable-auth-webhook", "0.0.0.0:8080", "--webhook-token", "test"}, {"serve", "--enable-kafka", "--kafka-bind", "0.0.0.0:9092"}, {"serve", "--enable-onchain-listener"}} {
 		var out bytes.Buffer
 		if err := Execute(context.Background(), args, &out, &out); err == nil {
 			t.Fatalf("validation allowed %v", args)
 		}
 	}
 	help := cli(t, "serve", "--help")
-	for _, want := range []string{"--enable-auth-webhook", "--enable-kafka", "--enable-onchain-listener", "Run on-chain RPC listener", "--ticket-broker", "--start-block", "--config-file", "Configuration file", "CLEARINGHOUSE_DB_PATH", "CLEARINGHOUSE_TICKET_BROKER"} {
+	for _, want := range []string{"--enable-auth-webhook string", "--unsafe-http-bind", "CLEARINGHOUSE_UNSAFE_HTTP_BIND", "--enable-kafka", "--enable-onchain-listener", "Run on-chain RPC listener", "--ticket-broker", "--start-block", "--config-file", "Configuration file", "CLEARINGHOUSE_DB_PATH", "CLEARINGHOUSE_TICKET_BROKER"} {
 		if !strings.Contains(help, want) {
 			t.Fatalf("help missing %s", want)
 		}
 	}
 	if strings.Contains(help, "--enable-chain") || strings.Contains(help, "CLEARINGHOUSE_ENABLE_CHAIN") {
 		t.Fatal("unsupported listener option exposed")
+	}
+	if strings.Contains(help, "--http-bind string") {
+		t.Fatal("removed HTTP bind option exposed")
+	}
+	for _, line := range strings.Split(help, "\n") {
+		if strings.Contains(line, "--enable-auth-webhook") && strings.Contains(line, "default") {
+			t.Fatal("auth webhook bind has a default")
+		}
 	}
 	if help := cli(t, "grant", "create", "--help"); !strings.Contains(help, "--amount-eth") || strings.Contains(help, "--amount-wei") {
 		t.Fatal(help)
@@ -220,7 +237,7 @@ func TestOrdinaryCommandsSkipMigrationPreflightButServeRejectsDrift(t *testing.T
 	if err := Execute(context.Background(), []string{"migrate", "status"}, &out, &out); err == nil || !strings.Contains(err.Error(), "unknown migration") {
 		t.Fatal(err)
 	}
-	p := ServeParams{Common: Common{DBPath: f.Path}, EnableAuthWebhook: true, HTTPBind: "127.0.0.1:8080", WebhookToken: "token"}
+	p := ServeParams{Common: Common{DBPath: f.Path}, EnableAuthWebhook: mustHTTPBind(t, "127.0.0.1:8080"), WebhookToken: "token"}
 	if err := Serve(context.Background(), p); err == nil || !strings.Contains(err.Error(), "unknown migration") {
 		t.Fatal(err)
 	}
@@ -246,7 +263,10 @@ func TestAllComponentCombinations(t *testing.T) {
 		t.Run(fmt.Sprint(mask), func(t *testing.T) {
 			dir := t.TempDir()
 			start := int64(0)
-			p := ServeParams{Common: Common{DBPath: filepath.Join(dir, "accounts.db")}, EnableAuthWebhook: mask&1 != 0, EnableKafka: mask&2 != 0, EnableOnchainListener: mask&4 != 0, HTTPBind: testutil.Port(t), WebhookToken: "test-token", KafkaBind: testutil.Port(t), KafkaTopic: "events", RPCURL: srv.URL, ChainID: "42161", TicketBroker: testutil.Contract, SignerAddresses: []string{testutil.Sender}, StartBlock: &start, Confirmations: 0, BlockBatchSize: 10, ReorgLookback: 4, PollInterval: 10 * time.Millisecond}
+			p := ServeParams{Common: Common{DBPath: filepath.Join(dir, "accounts.db")}, EnableKafka: mask&2 != 0, EnableOnchainListener: mask&4 != 0, WebhookToken: "test-token", KafkaBind: testutil.Port(t), KafkaTopic: "events", RPCURL: srv.URL, ChainID: "42161", TicketBroker: testutil.Contract, SignerAddresses: []string{testutil.Sender}, StartBlock: &start, Confirmations: 0, BlockBatchSize: 10, ReorgLookback: 4, PollInterval: 10 * time.Millisecond}
+			if mask&1 != 0 {
+				p.EnableAuthWebhook = mustHTTPBind(t, testutil.Port(t))
+			}
 			p.EnableAccounting = mask&8 != 0
 			producerAddr := p.KafkaBind
 			if p.EnableAccounting && !p.EnableKafka {
@@ -276,9 +296,9 @@ func TestAllComponentCombinations(t *testing.T) {
 				}
 			})
 			testutil.Eventually(t, func() bool {
-				if p.EnableAuthWebhook {
+				if p.EnableAuthWebhook.IsValid() {
 					client := http.Client{Timeout: time.Second}
-					res, err := client.Get("http://" + p.HTTPBind + "/readyz")
+					res, err := client.Get("http://" + p.EnableAuthWebhook.String() + "/readyz")
 					if err != nil {
 						return false
 					}
@@ -344,7 +364,7 @@ func TestAllComponentCombinations(t *testing.T) {
 					}
 				}
 			}
-			if !p.EnableAuthWebhook && !p.EnableAccounting && !p.EnableOnchainListener {
+			if !p.EnableAuthWebhook.IsValid() && !p.EnableAccounting && !p.EnableOnchainListener {
 				if _, err := os.Stat(p.DBPath); !os.IsNotExist(err) {
 					t.Fatalf("broker-only mode touched accounting database: %v", err)
 				}
@@ -360,7 +380,9 @@ func TestServeFromJSONConfig(t *testing.T) {
 	dir := t.TempDir()
 	bind := testutil.Port(t)
 	path := filepath.Join(dir, "serve.json")
-	data, err := json.Marshal(map[string]any{"DBPath": filepath.Join(dir, "config-only.db"), "EnableAuthWebhook": true, "HTTPBind": bind, "WebhookToken": "fixture-token"})
+	_, port, err := net.SplitHostPort(bind)
+	require.NoError(t, err)
+	data, err := json.Marshal(map[string]any{"DBPath": filepath.Join(dir, "config-only.db"), "EnableAuthWebhook": ":" + port, "WebhookToken": "fixture-token"})
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(path, data, 0600))
 	ctx, cancel := context.WithCancel(context.Background())

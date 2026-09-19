@@ -185,11 +185,10 @@ func benchmarkSteadyState(b *testing.B, layout benchmarkLayout, workers int) {
 	startBlock := int64(0)
 	params := ServeParams{
 		Common:                Common{DBPath: dbPath},
-		EnableAuthWebhook:     true,
+		EnableAuthWebhook:     mustHTTPBind(b, httpAddr),
 		EnableKafka:           true,
 		EnableAccounting:      true,
 		EnableOnchainListener: true,
-		HTTPBind:              httpAddr,
 		WebhookToken:          benchmarkWebhookToken,
 		KafkaBind:             kafkaAddr,
 		KafkaTopic:            benchmarkTopic,

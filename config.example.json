@@ -1,10 +1,10 @@
 {
   "DBPath": "clearinghouse.db",
-  "EnableAuthWebhook": true,
+  "EnableAuthWebhook": ":8080",
+  "UnsafeHTTPBind": false,
   "EnableKafka": true,
   "EnableAccounting": true,
   "EnableOnchainListener": false,
-  "HTTPBind": "127.0.0.1:8080",
   "KafkaBind": "127.0.0.1:9092",
   "KafkaTopic": "livepeer-signing",
   "Confirmations": 64,

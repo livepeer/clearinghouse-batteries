@@ -2,13 +2,14 @@
 DBPath = "clearinghouse.db"
 
 # Enable one or more serve components.
-EnableAuthWebhook = true
+EnableAuthWebhook = ":8080"
 EnableKafka = true
 EnableAccounting = true
 EnableOnchainListener = false
 
 # Set CLEARINGHOUSE_WEBHOOK_TOKEN in the environment when the webhook is enabled.
-HTTPBind = "127.0.0.1:8080"
+# Non-loopback and wildcard IPs additionally require UnsafeHTTPBind = true.
+# UnsafeHTTPBind = true
 
 # The embedded Kafka broker should listen only on a trusted loopback or private network.
 KafkaBind = "127.0.0.1:9092"

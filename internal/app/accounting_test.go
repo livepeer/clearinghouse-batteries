@@ -54,7 +54,7 @@ func TestAccountingConfigAndPrecedence(t *testing.T) {
 			require.Equal(t, []string{"config1:9092", "config2:9092"}, got.KafkaBrokers)
 			t.Setenv("CLEARINGHOUSE_KAFKA_BROKERS", "env1:9092,env2:9092")
 			t.Setenv("CLEARINGHOUSE_ENABLE_ACCOUNTING", "false")
-			t.Setenv("CLEARINGHOUSE_ENABLE_AUTH_WEBHOOK", "true")
+			t.Setenv("CLEARINGHOUSE_ENABLE_AUTH_WEBHOOK", ":8080")
 			t.Setenv("CLEARINGHOUSE_WEBHOOK_TOKEN", "test")
 			got = read("--config-file", path)
 			require.False(t, got.EnableAccounting)
