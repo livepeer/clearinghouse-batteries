@@ -24,8 +24,8 @@ import (
 )
 
 type Common struct {
-	DBPath     string `name:"db-path" env:"CLEARINGHOUSE_DB_PATH" default:"clearinghouse.db" descr:"Accounting SQLite file"`
-	ConfigFile string `optional:"true" env:"CLEARINGHOUSE_CONFIG_FILE" descr:"Configuration file"`
+	DBPath     string `name:"db-path" default:"clearinghouse.db" descr:"Accounting SQLite file"`
+	ConfigFile string `optional:"true" descr:"Configuration file"`
 }
 
 func (p Common) configPath() string { return p.ConfigFile }
@@ -54,24 +54,24 @@ func (b *HTTPBind) UnmarshalText(text []byte) error {
 
 type ServeParams struct {
 	Common
-	EnableAuthWebhook     HTTPBind      `optional:"true" env:"CLEARINGHOUSE_ENABLE_AUTH_WEBHOOK" descr:"Run signer authorization HTTP server on IP:port; :port binds to 127.0.0.1"`
-	UnsafeHTTPBind        bool          `name:"unsafe-http-bind" optional:"true" env:"CLEARINGHOUSE_UNSAFE_HTTP_BIND" descr:"Allow the auth webhook to bind to a non-loopback IP"`
-	EnableKafka           bool          `optional:"true" env:"CLEARINGHOUSE_ENABLE_KAFKA" descr:"Run embedded Kafka broker"`
-	EnableAccounting      bool          `optional:"true" env:"CLEARINGHOUSE_ENABLE_ACCOUNTING" descr:"Run accounting service"`
-	KafkaBrokers          []string      `optional:"true" env:"CLEARINGHOUSE_KAFKA_BROKERS" descr:"External Kafka bootstrap addresses (host:port)"`
-	EnableOnchainListener bool          `optional:"true" env:"CLEARINGHOUSE_ENABLE_ONCHAIN_LISTENER" descr:"Run on-chain RPC listener"`
-	WebhookToken          string        `optional:"true" env:"CLEARINGHOUSE_WEBHOOK_TOKEN" descr:"Signer-to-clearinghouse shared token"`
-	KafkaBind             string        `default:"127.0.0.1:9092" env:"CLEARINGHOUSE_KAFKA_BIND"`
-	KafkaTopic            string        `default:"livepeer-signing" env:"CLEARINGHOUSE_KAFKA_TOPIC"`
-	RPCURL                string        `name:"rpc-url" optional:"true" env:"CLEARINGHOUSE_RPC_URL"`
-	ChainID               string        `name:"chain-id" optional:"true" env:"CLEARINGHOUSE_CHAIN_ID" descr:"Optional assertion for the RPC chain ID"`
-	TicketBroker          string        `name:"ticket-broker" optional:"true" env:"CLEARINGHOUSE_TICKET_BROKER" descr:"TicketBroker override; resolved automatically on Arbitrum One"`
-	SignerAddresses       []string      `optional:"true" env:"CLEARINGHOUSE_SIGNER_ADDRESSES"`
-	StartBlock            *int64        `optional:"true" env:"CLEARINGHOUSE_START_BLOCK" descr:"First block for a new chain checkpoint; defaults to the current head"`
-	Confirmations         int64         `default:"64" env:"CLEARINGHOUSE_CONFIRMATIONS"`
-	PollInterval          time.Duration `default:"5s" env:"CLEARINGHOUSE_POLL_INTERVAL"`
-	BlockBatchSize        int64         `default:"2000" env:"CLEARINGHOUSE_BLOCK_BATCH_SIZE"`
-	ReorgLookback         int64         `default:"256" env:"CLEARINGHOUSE_REORG_LOOKBACK"`
+	EnableAuthWebhook     HTTPBind      `optional:"true" descr:"Run signer authorization HTTP server on IP:port; :port binds to 127.0.0.1"`
+	UnsafeHTTPBind        bool          `name:"unsafe-http-bind" optional:"true" descr:"Allow the auth webhook to bind to a non-loopback IP"`
+	EnableKafka           bool          `optional:"true" descr:"Run embedded Kafka broker"`
+	EnableAccounting      bool          `optional:"true" descr:"Run accounting service"`
+	KafkaBrokers          []string      `optional:"true" descr:"External Kafka bootstrap addresses (host:port)"`
+	EnableOnchainListener bool          `optional:"true" descr:"Run on-chain RPC listener"`
+	WebhookToken          string        `optional:"true" descr:"Signer-to-clearinghouse shared token"`
+	KafkaBind             string        `default:"127.0.0.1:9092"`
+	KafkaTopic            string        `default:"livepeer-signing"`
+	RPCURL                string        `name:"rpc-url" optional:"true"`
+	ChainID               string        `name:"chain-id" optional:"true" descr:"Optional assertion for the RPC chain ID"`
+	TicketBroker          string        `name:"ticket-broker" optional:"true" descr:"TicketBroker override; resolved automatically on Arbitrum One"`
+	SignerAddresses       []string      `optional:"true"`
+	StartBlock            *int64        `optional:"true" descr:"First block for a new chain checkpoint; defaults to the current head"`
+	Confirmations         int64         `default:"64"`
+	PollInterval          time.Duration `default:"5s"`
+	BlockBatchSize        int64         `default:"2000"`
+	ReorgLookback         int64         `default:"256"`
 }
 
 func (p ServeParams) chainConfig() chain.Config {

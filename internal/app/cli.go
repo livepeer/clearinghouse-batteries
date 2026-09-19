@@ -53,7 +53,11 @@ type KeyParams struct {
 }
 
 func command[T any](use, short string, fn func(*T, *cobra.Command) error) *cobra.Command {
-	return boa.Cmd[T]{Use: use, Short: short, PreValidateFunc: func(p *T, c *cobra.Command, args []string) error {
+	return boa.Cmd[T]{Use: use, Short: short, ParamEnrich: boa.ParamEnricherCombine(
+		boa.ParamEnricherDefault,
+		boa.ParamEnricherEnv,
+		boa.ParamEnricherEnvPrefix("CLEARINGHOUSE"),
+	), PreValidateFunc: func(p *T, c *cobra.Command, args []string) error {
 		// Config decoding can reuse a slice's backing array, which would mutate
 		// boa's saved CLI/environment value before it reapplies precedence.
 		if serve, ok := any(p).(*ServeParams); ok {

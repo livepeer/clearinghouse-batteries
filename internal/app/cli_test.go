@@ -169,6 +169,9 @@ func TestBoaConfigEnvironmentValidationAndHelp(t *testing.T) {
 	if help := cli(t, "grant", "create", "--help"); !strings.Contains(help, "--amount-eth") || strings.Contains(help, "--amount-wei") {
 		t.Fatal(help)
 	}
+	if help := cli(t, "grant", "create", "--help"); !strings.Contains(help, "CLEARINGHOUSE_AMOUNT_ETH") || !strings.Contains(help, "CLEARINGHOUSE_NAME") {
+		t.Fatal("generated environment variables missing from management command help")
+	}
 	escrowHelp := cli(t, "escrow", "--help")
 	for _, want := range []string{"Inspect on-chain payment accounting", "List on-chain payment activity", "Report confirmed deposit and reserve balances"} {
 		if !strings.Contains(escrowHelp, want) {
