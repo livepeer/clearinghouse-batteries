@@ -18,6 +18,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/rpc"
+	"github.com/j0sh/boa/pkg/boa"
 	"github.com/livepeer/clearinghouse/internal/kafka"
 	"github.com/livepeer/clearinghouse/internal/store"
 	"github.com/livepeer/clearinghouse/internal/testutil"
@@ -125,6 +126,26 @@ func TestCLIAllocationAllAndKeyAutoAllocation(t *testing.T) {
 	err := Execute(context.Background(), []string{"api-key", "create", "--grant-id", "missing", "--name", "atomic", "--amount-eth", "1"}, &out, &out)
 	if err == nil || cli(t, "api-key", "list") != before {
 		t.Fatal("failed auto-allocation was not atomic", err)
+	}
+}
+
+func TestCLIStatusEnums(t *testing.T) {
+	t.Setenv("CLEARINGHOUSE_DB_PATH", filepath.Join(t.TempDir(), "missing.db"))
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"grant create", []string{"grant", "create", "--name", "grant", "--status", "closed"}},
+		{"allocation create", []string{"allocation", "create", "--name", "allocation", "--grant-id", "grant", "--status", "exhausted"}},
+		{"grant transition", []string{"grant", "set-status", "--id", "grant", "--status", "revoked"}},
+		{"allocation transition", []string{"allocation", "set-status", "--id", "allocation", "--status", "closed"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			err := Execute(context.Background(), tc.args, &out, &out)
+			require.ErrorContains(t, err, "is not in the list of allowed values")
+			require.True(t, boa.IsUserInputError(err))
+		})
 	}
 }
 

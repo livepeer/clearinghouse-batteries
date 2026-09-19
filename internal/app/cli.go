@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -39,7 +40,7 @@ type CreateParams struct {
 	Sponsor     string `optional:"true"`
 	Beneficiary string `optional:"true"`
 	GrantID     string `optional:"true"`
-	Status      string `optional:"true"`
+	Status      string `optional:"true" descr:"Initial status"`
 	Metadata    string `default:"{}"`
 	StartsAt    string `optional:"true" descr:"RFC3339 start time"`
 	EndsAt      string `optional:"true" descr:"RFC3339 end time"`
@@ -52,11 +53,12 @@ type KeyParams struct {
 	AmountETH    string `optional:"true" descr:"Required ETH funding with --grant-id; accepts 'all'"`
 }
 
-func command[T any](use, short string, fn func(*T, *cobra.Command) error) *cobra.Command {
+func command[T any](use, short string, fn func(*T, *cobra.Command) error, enrich ...boa.ParamEnricher) *cobra.Command {
 	return boa.Cmd[T]{Use: use, Short: short, ParamEnrich: boa.ParamEnricherCombine(
 		boa.ParamEnricherDefault,
 		boa.ParamEnricherEnv,
 		boa.ParamEnricherEnvPrefix("CLEARINGHOUSE"),
+		boa.ParamEnricherCombine(enrich...),
 	), PreValidateFunc: func(p *T, c *cobra.Command, args []string) error {
 		// Config decoding can reuse a slice's backing array, which would mutate
 		// boa's saved CLI/environment value before it reapplies precedence.
@@ -73,12 +75,26 @@ func command[T any](use, short string, fn func(*T, *cobra.Command) error) *cobra
 	}}.ToCobra()
 }
 
+func statusValues(values string) boa.ParamEnricher {
+	return func(_ []boa.Parameter, p boa.Parameter, field string) error {
+		if field == "Status" {
+			p.SetAlternatives(strings.Split(values, ","))
+			p.SetDescription(p.GetDescription() + ": " + strings.ReplaceAll(values, ",", ", "))
+		}
+		return nil
+	}
+}
+
 func Root(out, errOut io.Writer) *cobra.Command {
 	root := &cobra.Command{Use: "clearinghouse", Short: "Livepeer grant accounting", SilenceErrors: true, SilenceUsage: true}
 	root.SetOut(out)
 	root.SetErr(errOut)
 	root.AddCommand(command[ServeParams]("serve", "Run selected online integrations", func(p *ServeParams, c *cobra.Command) error { return Serve(c.Context(), *p) }))
 	for _, kind := range []string{"grant", "allocation"} {
+		initial, statuses := "draft,active,paused", "draft,active,paused,closed"
+		if kind == "allocation" {
+			initial, statuses = "active,paused", "active,paused,exhausted,revoked"
+		}
 		group := &cobra.Command{Use: kind, Short: "Manage " + kind + "s"}
 		group.AddCommand(command[CreateParams]("create", "Create and fund a "+kind, func(p *CreateParams, c *cobra.Command) error {
 			starts, err := parseTime(p.StartsAt)
@@ -100,13 +116,13 @@ func Root(out, errOut io.Writer) *cobra.Command {
 				id, err := db.Create(c.Context(), kind, store.Create{Name: p.Name, Sponsor: p.Sponsor, Beneficiary: p.Beneficiary, GrantID: p.GrantID, Amount: amount, Status: p.Status, Metadata: p.Metadata, Starts: starts, Ends: ends})
 				return map[string]string{"id": id}, err
 			})
-		}))
+		}, statusValues(initial)))
 		addRead(group, kind)
 		group.AddCommand(command[StatusParams]("set-status", "Change lifecycle status", func(p *StatusParams, c *cobra.Command) error {
 			return withDB(c, p.Common, false, func(db *store.Store) (any, error) {
 				return map[string]string{"id": p.ID, "status": p.Status}, db.SetStatus(c.Context(), kind, p.ID, p.Status)
 			})
-		}))
+		}, statusValues(statuses)))
 		group.AddCommand(command[FundParams]("fund", "Add funding in ETH", func(p *FundParams, c *cobra.Command) error {
 			amount, err := inputAmount(p.AmountETH, kind == "allocation")
 			if err != nil {
