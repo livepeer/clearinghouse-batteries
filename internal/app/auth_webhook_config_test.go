@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -65,13 +66,17 @@ func TestAuthWebhookBindValidation(t *testing.T) {
 	}
 
 	p := ServeParams{EnableAuthWebhook: mustHTTPBind(t, ":8080")}
-	require.ErrorContains(t, p.Validate(), "--webhook-token")
+	require.ErrorContains(t, p.Validate(), "CLEARINGHOUSE_WEBHOOK_TOKEN")
 	require.NoError(t, (ServeParams{UnsafeHTTPBind: true, EnableKafka: true, KafkaBind: "127.0.0.1:9092", KafkaTopic: "events"}).Validate())
 }
 
 func TestAuthWebhookConfigPrecedence(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "serve.toml")
-	require.NoError(t, os.WriteFile(path, []byte("EnableAuthWebhook = \":7101\"\nWebhookToken = \"token\"\n"), 0600))
+	dir := t.TempDir()
+	path := filepath.Join(dir, "serve.toml")
+	tokenPath := filepath.Join(dir, "webhook-token")
+	require.NoError(t, os.WriteFile(tokenPath, []byte("token"), 0600))
+	config := fmt.Sprintf("EnableAuthWebhook = \":7101\"\nWebhookTokenFile = %q\n", tokenPath)
+	require.NoError(t, os.WriteFile(path, []byte(config), 0600))
 	read := func(args ...string) ServeParams {
 		t.Helper()
 		var got ServeParams
@@ -84,7 +89,9 @@ func TestAuthWebhookConfigPrecedence(t *testing.T) {
 		return got
 	}
 
-	require.Equal(t, "127.0.0.1:7101", read("--config-file", path).EnableAuthWebhook.String())
+	fromConfig := read("--config-file", path)
+	require.Equal(t, "127.0.0.1:7101", fromConfig.EnableAuthWebhook.String())
+	require.Equal(t, "token", fromConfig.WebhookToken)
 
 	t.Setenv("CLEARINGHOUSE_ENABLE_AUTH_WEBHOOK", ":7102")
 	require.Equal(t, "127.0.0.1:7102", read("--config-file", path).EnableAuthWebhook.String())

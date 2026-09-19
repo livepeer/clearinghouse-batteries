@@ -7,7 +7,9 @@ EnableKafka = true
 EnableAccounting = true
 EnableOnchainListener = false
 
-# Set CLEARINGHOUSE_WEBHOOK_TOKEN in the environment when the webhook is enabled.
+# Set CLEARINGHOUSE_WEBHOOK_TOKEN in the environment when the webhook is enabled,
+# or point at a mounted secret file.
+# WebhookTokenFile = "/run/secrets/clearinghouse-webhook-token"
 # Non-loopback and wildcard IPs additionally require UnsafeHTTPBind = true.
 # UnsafeHTTPBind = true
 
@@ -19,8 +21,9 @@ KafkaTopic = "livepeer-signing"
 # and provide bootstrap addresses. Do not use KafkaBrokers with embedded Kafka.
 # KafkaBrokers = ["broker1:9092", "broker2:9092"]
 
-# On-chain listener settings. RPCURL and SignerAddresses are required when enabled.
-# RPCURL = "https://YOUR_RPC"
+# On-chain listener settings. An RPC URL and SignerAddresses are required when enabled.
+# Set CLEARINGHOUSE_RPC_URL or point at a mounted secret file.
+# RPCURLFile = "/run/secrets/clearinghouse-rpc-url"
 # SignerAddresses = ["0xYOUR_SIGNER"]
 # ChainID = "42161"       # Optional RPC chain assertion.
 # TicketBroker = "0x..."  # Optional override on Arbitrum One.

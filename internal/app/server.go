@@ -60,10 +60,12 @@ type ServeParams struct {
 	EnableAccounting      bool          `optional:"true" descr:"Run accounting service"`
 	KafkaBrokers          []string      `optional:"true" descr:"External Kafka bootstrap addresses (host:port)"`
 	EnableOnchainListener bool          `optional:"true" descr:"Run on-chain RPC listener"`
-	WebhookToken          string        `optional:"true" descr:"Signer-to-clearinghouse shared token"`
+	WebhookToken          string        `optional:"true" secret:"true" descr:"Signer-to-clearinghouse shared token"`
+	WebhookTokenFile      string        `secretfor:"WebhookToken" descr:"File containing the signer-to-clearinghouse shared token"`
 	KafkaBind             string        `default:"127.0.0.1:9092"`
 	KafkaTopic            string        `default:"livepeer-signing"`
-	RPCURL                string        `name:"rpc-url" optional:"true"`
+	RPCURL                string        `name:"rpc-url" optional:"true" secret:"true"`
+	RPCURLFile            string        `name:"rpc-url-file" secretfor:"RPCURL" descr:"File containing the on-chain RPC URL"`
 	ChainID               string        `name:"chain-id" optional:"true" descr:"Optional assertion for the RPC chain ID"`
 	TicketBroker          string        `name:"ticket-broker" optional:"true" descr:"TicketBroker override; resolved automatically on Arbitrum One"`
 	SignerAddresses       []string      `optional:"true"`
@@ -106,7 +108,7 @@ func (p ServeParams) Validate() error {
 			return errors.New("auth webhook bind must be a loopback IP; use --unsafe-http-bind to allow a non-loopback address")
 		}
 		if p.WebhookToken == "" {
-			return errors.New("--webhook-token is required for the auth webhook")
+			return errors.New("webhook token required: set CLEARINGHOUSE_WEBHOOK_TOKEN or --webhook-token-file")
 		}
 	}
 	if p.EnableKafka {
@@ -125,7 +127,7 @@ func (p ServeParams) Validate() error {
 	}
 	if p.EnableOnchainListener {
 		if p.RPCURL == "" {
-			return errors.New("--rpc-url required")
+			return errors.New("RPC URL required: set CLEARINGHOUSE_RPC_URL or --rpc-url-file")
 		}
 		return p.chainConfig().Validate()
 	}

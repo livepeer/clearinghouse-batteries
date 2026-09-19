@@ -200,9 +200,17 @@ Both TOML and JSON configuration files are supported. Start with
 [`config.example.json`](config.example.json). Configuration keys use the field
 names shown in those examples.
 
+Secrets can be provided directly through the environment or via a local mounted
+secret file.
 
-Secrets can only be specified in the environment or via a local mounted secret
-file; these are indicated with a `file` suffix.
+| Secret | Direct environment | File environment | File flag | Configuration key |
+| --- | --- | --- | --- | --- |
+| Authorization webhook token | `CLEARINGHOUSE_WEBHOOK_TOKEN` | `CLEARINGHOUSE_WEBHOOK_TOKEN_FILE` | `--webhook-token-file` | `WebhookTokenFile` |
+| On-chain RPC URL | `CLEARINGHOUSE_RPC_URL` | `CLEARINGHOUSE_RPC_URL_FILE` | `--rpc-url-file` | `RPCURLFile` |
+
+Direct secret flags and configuration values are not accepted. Secret file
+contents are used verbatim, so avoid a trailing newline unless it is part of the
+secret.
 
 ### Commands
 

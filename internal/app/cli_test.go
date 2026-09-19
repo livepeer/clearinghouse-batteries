@@ -150,9 +150,19 @@ func TestBoaConfigEnvironmentValidationAndHelp(t *testing.T) {
 		}
 	}
 	help := cli(t, "serve", "--help")
-	for _, want := range []string{"--enable-auth-webhook string", "--unsafe-http-bind", "CLEARINGHOUSE_UNSAFE_HTTP_BIND", "--enable-kafka", "--enable-onchain-listener", "Run on-chain RPC listener", "--ticket-broker", "--start-block", "--config-file", "Configuration file", "CLEARINGHOUSE_DB_PATH", "CLEARINGHOUSE_TICKET_BROKER"} {
+	for _, want := range []string{"--enable-auth-webhook string", "--unsafe-http-bind", "CLEARINGHOUSE_UNSAFE_HTTP_BIND", "--enable-kafka", "--enable-onchain-listener", "Run on-chain RPC listener", "--ticket-broker", "--start-block", "--config-file", "Configuration file", "CLEARINGHOUSE_DB_PATH", "CLEARINGHOUSE_TICKET_BROKER", "--webhook-token-file", "CLEARINGHOUSE_WEBHOOK_TOKEN_FILE", "--rpc-url-file", "CLEARINGHOUSE_RPC_URL_FILE"} {
 		if !strings.Contains(help, want) {
 			t.Fatalf("help missing %s", want)
+		}
+	}
+	for _, line := range strings.Split(help, "\n") {
+		if strings.Contains(line, "--webhook-token ") || strings.Contains(line, "--rpc-url ") {
+			t.Fatalf("direct secret flag exposed in help: %s", line)
+		}
+	}
+	for _, want := range []string{"\nEnvironment Variables:\n", "\n  CLEARINGHOUSE_WEBHOOK_TOKEN  Signer-to-clearinghouse shared token\n", "\n  CLEARINGHOUSE_RPC_URL\n"} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("secret environment help missing %q", want)
 		}
 	}
 	if strings.Contains(help, "--enable-chain") || strings.Contains(help, "CLEARINGHOUSE_ENABLE_CHAIN") {
@@ -187,7 +197,7 @@ func TestBoaConfigEnvironmentValidationAndHelp(t *testing.T) {
 	t.Setenv("CLEARINGHOUSE_ENABLE_ONCHAIN_LISTENER", "true")
 	out.Reset()
 	err = Execute(context.Background(), []string{"serve"}, &out, &out)
-	if err == nil || !strings.Contains(err.Error(), "--rpc-url required") {
+	if err == nil || !strings.Contains(err.Error(), "CLEARINGHOUSE_RPC_URL") {
 		t.Fatal("on-chain listener environment variable was not loaded", err)
 	}
 }
@@ -383,9 +393,11 @@ func TestServeFromJSONConfig(t *testing.T) {
 	dir := t.TempDir()
 	bind := testutil.Port(t)
 	path := filepath.Join(dir, "serve.json")
+	tokenPath := filepath.Join(dir, "webhook-token")
+	require.NoError(t, os.WriteFile(tokenPath, []byte("fixture-token"), 0600))
 	_, port, err := net.SplitHostPort(bind)
 	require.NoError(t, err)
-	data, err := json.Marshal(map[string]any{"DBPath": filepath.Join(dir, "config-only.db"), "EnableAuthWebhook": ":" + port, "WebhookToken": "fixture-token"})
+	data, err := json.Marshal(map[string]any{"DBPath": filepath.Join(dir, "config-only.db"), "EnableAuthWebhook": ":" + port, "WebhookTokenFile": tokenPath})
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(path, data, 0600))
 	ctx, cancel := context.WithCancel(context.Background())
