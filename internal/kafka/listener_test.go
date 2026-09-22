@@ -26,7 +26,7 @@ func TestRealBrokerRestartAndReplay(t *testing.T) {
 		t.Helper()
 		broker, err := OpenBroker(ctx, testutil.Port(t), "events", dir)
 		require.NoError(t, err)
-		l := &Listener{DB: f.DB, Brokers: []string{testutil.Port(t), broker.Addr()}, Topic: "events"}
+		l := &Listener{DB: f.DB, Broker: broker.Addr(), Topic: "events"}
 		runCtx, cancel := context.WithCancel(ctx)
 		done := make(chan error, 2)
 		go func() { done <- broker.Serve(runCtx) }()
@@ -52,7 +52,7 @@ func TestRealBrokerRestartAndReplay(t *testing.T) {
 	// Match the writer configuration used by go-livepeer's monitor producer.
 	produce := func(l *Listener, values ...[]byte) {
 		t.Helper()
-		w := kgo.NewWriter(kgo.WriterConfig{Brokers: l.Brokers[1:], Topic: l.Topic, Balancer: kgo.CRC32Balancer{}, BatchTimeout: time.Millisecond})
+		w := kgo.NewWriter(kgo.WriterConfig{Brokers: []string{l.Broker}, Topic: l.Topic, Balancer: kgo.CRC32Balancer{}, BatchTimeout: time.Millisecond})
 		defer w.Close()
 		messages := []kgo.Message{}
 		for _, v := range values {
@@ -100,7 +100,7 @@ func TestAllPartitionsRestartAndReplay(t *testing.T) {
 		t.Helper()
 		broker, err := OpenBroker(ctx, "127.0.0.1:0", "events", dir)
 		require.NoError(t, err)
-		listener := &Listener{DB: f.DB, Brokers: []string{broker.Addr()}, Topic: "events"}
+		listener := &Listener{DB: f.DB, Broker: broker.Addr(), Topic: "events"}
 		runCtx, stop := context.WithCancel(ctx)
 		done := make(chan error, 2)
 		go func() { done <- broker.Serve(runCtx) }()
@@ -183,7 +183,7 @@ func TestConsumerFailureStopsAllPartitions(t *testing.T) {
 	require.NoError(t, backend.CreateTopic(ctx, "events", minikafka.TopicOptions{Partitions: 3}))
 	broker, err := minikafka.Open(minikafka.Config{Addr: "127.0.0.1:0", Store: backend})
 	require.NoError(t, err)
-	listener := &Listener{DB: f.DB, Brokers: []string{broker.Addr()}, Topic: "events"}
+	listener := &Listener{DB: f.DB, Broker: broker.Addr(), Topic: "events"}
 	brokerDone, listenerDone := make(chan error, 1), make(chan error, 1)
 	go func() { brokerDone <- broker.Serve(ctx) }()
 	go func() { listenerDone <- listener.Run(ctx) }()
@@ -366,7 +366,7 @@ func TestConsumerRejectsLostOffsets(t *testing.T) {
 				return store.SetCheckpoint(ctx, tx, "kafka", store.KafkaStream("events", tc.partition), tc.next, "")
 			}))
 
-			l := &Listener{DB: f.DB, Brokers: []string{broker.Addr()}, Topic: "events"}
+			l := &Listener{DB: f.DB, Broker: broker.Addr(), Topic: "events"}
 			readCtx, stop := context.WithTimeout(ctx, 5*time.Second)
 			defer stop()
 			if err := l.Run(readCtx); err == nil || !strings.Contains(err.Error(), "outside retained offsets") {

@@ -122,7 +122,7 @@ To run the accounting service with an external Kafka broker:
 ```sh
 ./bin/clearinghouse serve \
   --enable-accounting \
-  --kafka-brokers broker1:9092,broker2:9092
+  --kafka-broker broker:9092
 ```
 
 Use `--kafka-topic` to select the topic configured on the signer. External broker

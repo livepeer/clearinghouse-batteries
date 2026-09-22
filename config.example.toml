@@ -18,8 +18,8 @@ KafkaBind = "127.0.0.1:9092"
 KafkaTopic = "livepeer-signing"
 
 # For external plaintext Kafka, set EnableKafka = false, keep EnableAccounting = true,
-# and provide bootstrap addresses. Do not use KafkaBrokers with embedded Kafka.
-# KafkaBrokers = ["broker1:9092", "broker2:9092"]
+# and provide its address. Do not use KafkaBroker with embedded Kafka.
+# KafkaBroker = "broker:9092"
 
 # On-chain listener settings. An RPC URL and SignerAddresses are required when enabled.
 # Set CLEARINGHOUSE_RPC_URL or point at a mounted secret file.

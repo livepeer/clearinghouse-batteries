@@ -315,7 +315,7 @@ func TestAllComponentCombinations(t *testing.T) {
 					require.NoError(t, <-brokerDone)
 				})
 				producerAddr = broker.Addr()
-				p.KafkaBrokers = []string{testutil.Port(t), producerAddr}
+				p.KafkaBroker = producerAddr
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan error, 1)

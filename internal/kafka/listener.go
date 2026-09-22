@@ -20,10 +20,10 @@ import (
 )
 
 type Listener struct {
-	DB      *store.Store
-	Brokers []string
-	Topic   string
-	Ready   atomic.Bool
+	DB     *store.Store
+	Broker string
+	Topic  string
+	Ready  atomic.Bool
 }
 
 // OpenBroker initializes persistent storage and binds the listener before returning.
@@ -57,8 +57,8 @@ func OpenBroker(ctx context.Context, bind, topic, dir string) (*minikafka.Broker
 
 func (l *Listener) Run(ctx context.Context) error {
 	defer l.Ready.Store(false)
-	if len(l.Brokers) == 0 {
-		return errors.New("Kafka bootstrap brokers required")
+	if l.Broker == "" {
+		return errors.New("Kafka broker address required")
 	}
 	partitions, err := l.partitions(ctx)
 	if err != nil {
@@ -109,7 +109,7 @@ func (l *Listener) openReader(ctx context.Context, partition int) (*kgo.Reader, 
 		return nil, 0, fmt.Errorf("Kafka topic %s partition %d checkpoint %d outside retained offsets [%d,%d]; broker data was lost or replaced", l.Topic, partition, next, first, last)
 	}
 	reader := kgo.NewReader(kgo.ReaderConfig{
-		Brokers:               l.Brokers,
+		Brokers:               []string{l.Broker},
 		Topic:                 l.Topic,
 		Partition:             partition,
 		MinBytes:              1,
@@ -127,7 +127,7 @@ func (l *Listener) openReader(ctx context.Context, partition int) (*kgo.Reader, 
 
 func (l *Listener) readPartition(ctx context.Context, reader *kgo.Reader, next int64) error {
 	partition := reader.Config().Partition
-	slog.Info("accounting partition ready", "brokers", l.Brokers, "topic", l.Topic, "partition", partition, "next_offset", next)
+	slog.Info("accounting partition ready", "broker", l.Broker, "topic", l.Topic, "partition", partition, "next_offset", next)
 	for {
 		msg, err := reader.ReadMessage(ctx)
 		if ctx.Err() != nil {
@@ -147,61 +147,46 @@ func (l *Listener) readPartition(ctx context.Context, reader *kgo.Reader, next i
 }
 
 func (l *Listener) partitions(ctx context.Context) ([]int, error) {
-	var failures []error
-	for _, addr := range l.Brokers {
-		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		conn, err := kgo.DialContext(probeCtx, "tcp", addr)
-		var partitions []int
-		if err == nil {
-			deadline, _ := probeCtx.Deadline()
-			_ = conn.SetDeadline(deadline)
-			var metadata []kgo.Partition
-			metadata, err = conn.ReadPartitions(l.Topic)
-			_ = conn.Close()
-			for _, p := range metadata {
-				if p.Topic == l.Topic && p.ID >= 0 {
-					partitions = append(partitions, p.ID)
-				}
-			}
-			if err == nil && len(partitions) == 0 {
-				err = fmt.Errorf("Kafka topic %s has no partitions", l.Topic)
-			}
-		}
-		cancel()
-		if err == nil {
-			slices.Sort(partitions)
-			return slices.Compact(partitions), nil
-		}
-		failures = append(failures, fmt.Errorf("%s: %w", addr, err))
-		if ctx.Err() != nil {
-			break
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	conn, err := kgo.DialContext(probeCtx, "tcp", l.Broker)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", l.Broker, err)
+	}
+	deadline, _ := probeCtx.Deadline()
+	_ = conn.SetDeadline(deadline)
+	metadata, err := conn.ReadPartitions(l.Topic)
+	_ = conn.Close()
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", l.Broker, err)
+	}
+	var partitions []int
+	for _, p := range metadata {
+		if p.Topic == l.Topic && p.ID >= 0 {
+			partitions = append(partitions, p.ID)
 		}
 	}
-	return nil, errors.Join(failures...)
+	if len(partitions) == 0 {
+		return nil, fmt.Errorf("Kafka topic %s has no partitions", l.Topic)
+	}
+	slices.Sort(partitions)
+	return slices.Compact(partitions), nil
 }
 
-// Each bootstrap gets its own timeout so an unavailable address does not prevent
-// probing the remaining brokers. DialLeader discovers the partition's current leader.
+// DialLeader discovers the partition's current leader from the configured broker.
 func (l *Listener) offsets(ctx context.Context, partition int) (int64, int64, error) {
-	var failures []error
-	for _, addr := range l.Brokers {
-		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		conn, err := kgo.DialLeader(probeCtx, "tcp", addr, l.Topic, partition)
-		var first, last int64
-		if err == nil {
-			deadline, _ := probeCtx.Deadline()
-			_ = conn.SetDeadline(deadline)
-			first, last, err = conn.ReadOffsets()
-			_ = conn.Close()
-		}
-		cancel()
-		if err == nil {
-			return first, last, nil
-		}
-		failures = append(failures, fmt.Errorf("%s: %w", addr, err))
-		if ctx.Err() != nil {
-			break
-		}
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	conn, err := kgo.DialLeader(probeCtx, "tcp", l.Broker, l.Topic, partition)
+	if err != nil {
+		return 0, 0, fmt.Errorf("%s: %w", l.Broker, err)
 	}
-	return 0, 0, errors.Join(failures...)
+	deadline, _ := probeCtx.Deadline()
+	_ = conn.SetDeadline(deadline)
+	first, last, err := conn.ReadOffsets()
+	_ = conn.Close()
+	if err != nil {
+		return 0, 0, fmt.Errorf("%s: %w", l.Broker, err)
+	}
+	return first, last, nil
 }

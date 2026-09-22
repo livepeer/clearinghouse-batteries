@@ -58,7 +58,7 @@ type ServeParams struct {
 	UnsafeHTTPBind        bool          `name:"unsafe-http-bind" optional:"true" descr:"Allow the auth webhook to bind to a non-loopback IP"`
 	EnableKafka           bool          `optional:"true" descr:"Run embedded Kafka broker"`
 	EnableAccounting      bool          `optional:"true" descr:"Run accounting service"`
-	KafkaBrokers          []string      `optional:"true" descr:"External Kafka bootstrap addresses (host:port)"`
+	KafkaBroker           string        `optional:"true" descr:"External Kafka broker address (host:port)"`
 	EnableOnchainListener bool          `optional:"true" descr:"Run on-chain RPC listener"`
 	WebhookToken          string        `optional:"true" secret:"true" descr:"Signer-to-clearinghouse shared token"`
 	WebhookTokenFile      string        `secretfor:"WebhookToken" descr:"File containing the signer-to-clearinghouse shared token"`
@@ -85,17 +85,17 @@ func (p ServeParams) Validate() error {
 	if !webhookEnabled && !p.EnableKafka && !p.EnableAccounting && !p.EnableOnchainListener {
 		return errors.New("enable at least one of --enable-auth-webhook, --enable-kafka, --enable-accounting, --enable-onchain-listener")
 	}
-	if p.EnableKafka && len(p.KafkaBrokers) > 0 {
-		return errors.New("--kafka-brokers cannot be used with --enable-kafka")
+	if p.EnableKafka && p.KafkaBroker != "" {
+		return errors.New("--kafka-broker cannot be used with --enable-kafka")
 	}
-	if p.EnableAccounting && !p.EnableKafka && len(p.KafkaBrokers) == 0 {
-		return errors.New("--kafka-brokers required for accounting without embedded Kafka")
+	if p.EnableAccounting && !p.EnableKafka && p.KafkaBroker == "" {
+		return errors.New("--kafka-broker required for accounting without embedded Kafka")
 	}
-	for _, addr := range p.KafkaBrokers {
-		host, port, err := net.SplitHostPort(addr)
+	if p.KafkaBroker != "" {
+		host, port, err := net.SplitHostPort(p.KafkaBroker)
 		n, portErr := strconv.Atoi(port)
 		if err != nil || host == "" || portErr != nil || n < 1 || n > 65535 {
-			return fmt.Errorf("invalid Kafka broker address %q: expected host:port", addr)
+			return fmt.Errorf("invalid Kafka broker address %q: expected host:port", p.KafkaBroker)
 		}
 	}
 	if p.EnableKafka || p.EnableAccounting {
@@ -174,7 +174,7 @@ func Serve(ctx context.Context, p ServeParams) error {
 		locks = append(locks, f)
 	}
 	var broker *minikafka.Broker
-	brokers := p.KafkaBrokers
+	brokerAddr := p.KafkaBroker
 	if p.EnableKafka {
 		var err error
 		broker, err = kafka.OpenBroker(ctx, p.KafkaBind, p.KafkaTopic, filepath.Dir(p.DBPath))
@@ -182,9 +182,9 @@ func Serve(ctx context.Context, p ServeParams) error {
 			return err
 		}
 		defer broker.Close()
-		brokers = []string{broker.Addr()}
+		brokerAddr = broker.Addr()
 	}
-	k := &kafka.Listener{DB: db, Brokers: brokers, Topic: p.KafkaTopic}
+	k := &kafka.Listener{DB: db, Broker: brokerAddr, Topic: p.KafkaTopic}
 	c := &chain.Listener{DB: db, Config: p.chainConfig()}
 	done := make(chan error, 4)
 	count := 0

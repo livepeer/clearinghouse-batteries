@@ -60,11 +60,6 @@ func command[T any](use, short string, fn func(*T, *cobra.Command) error, enrich
 		boa.ParamEnricherEnvPrefix("CLEARINGHOUSE"),
 		boa.ParamEnricherCombine(enrich...),
 	), PreValidateFunc: func(p *T, c *cobra.Command, args []string) error {
-		// Config decoding can reuse a slice's backing array, which would mutate
-		// boa's saved CLI/environment value before it reapplies precedence.
-		if serve, ok := any(p).(*ServeParams); ok {
-			serve.KafkaBrokers = append([]string(nil), serve.KafkaBrokers...)
-		}
 		// Load the whole leaf command, not just its embedded Common struct.
 		return boa.LoadConfigFile(any(p).(interface{ configPath() string }).configPath(), p, nil)
 	}, RunFuncE: func(p *T, c *cobra.Command, args []string) error {
