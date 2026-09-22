@@ -271,7 +271,7 @@ func benchmarkSteadyState(b *testing.B, layout benchmarkLayout, workers int) {
 	err = writer.WriteMessages(warmupCtx, kgo.Message{Value: []byte(`{"id":"benchmark-warmup","type":"other","data":{}}`)})
 	if err == nil {
 		err = waitBenchmark(warmupCtx, func() (bool, error) {
-			next, _, found, checkpointErr := observer.Checkpoint(warmupCtx, "kafka", benchmarkTopic)
+			next, _, found, checkpointErr := observer.Checkpoint(warmupCtx, "kafka", store.KafkaStream(benchmarkTopic, 0))
 			return found && next == benchmarkWarmupEvents, checkpointErr
 		})
 	}
@@ -326,7 +326,7 @@ func benchmarkSteadyState(b *testing.B, layout benchmarkLayout, workers int) {
 	}
 	drainCtx, cancelDrain := context.WithTimeout(ctx, 30*time.Second)
 	err = waitBenchmark(drainCtx, func() (bool, error) {
-		kafkaNext, _, kafkaFound, checkpointErr := observer.Checkpoint(drainCtx, "kafka", benchmarkTopic)
+		kafkaNext, _, kafkaFound, checkpointErr := observer.Checkpoint(drainCtx, "kafka", store.KafkaStream(benchmarkTopic, 0))
 		if checkpointErr != nil {
 			return false, checkpointErr
 		}
@@ -578,7 +578,7 @@ func verifySteadyStateBenchmark(ctx context.Context, db *store.Store, layout ben
 	if settlements != redemptions || matched != redemptions {
 		return fmt.Errorf("settlement mismatch: settlements=%d matched=%d want=%d", settlements, matched, redemptions)
 	}
-	kafkaNext, _, kafkaFound, err := db.Checkpoint(ctx, "kafka", benchmarkTopic)
+	kafkaNext, _, kafkaFound, err := db.Checkpoint(ctx, "kafka", store.KafkaStream(benchmarkTopic, 0))
 	if err != nil {
 		return err
 	}

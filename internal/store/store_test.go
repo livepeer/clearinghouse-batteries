@@ -135,11 +135,11 @@ func TestIngestExactMoneyReplayQuarantineOverdraw(t *testing.T) {
 	f := testutil.New(t, budget)
 	ctx := context.Background()
 	raw := f.Event(t, "event-1", budget, testutil.PM)
-	require.NoError(t, f.DB.Ingest(ctx, "test", 0, raw))
-	require.NoError(t, f.DB.Ingest(ctx, "test", 0, raw))
-	require.NoError(t, f.DB.Ingest(ctx, "test", 1, raw))
-	require.NoError(t, f.DB.Ingest(ctx, "test", 2, []byte(`{bad`)))
-	require.NoError(t, f.DB.Ingest(ctx, "test", 3, f.Event(t, "event-2", "17", testutil.PM)))
+	require.NoError(t, f.DB.Ingest(ctx, "test", 0, 0, raw))
+	require.NoError(t, f.DB.Ingest(ctx, "test", 0, 0, raw))
+	require.NoError(t, f.DB.Ingest(ctx, "test", 0, 1, raw))
+	require.NoError(t, f.DB.Ingest(ctx, "test", 0, 2, []byte(`{bad`)))
+	require.NoError(t, f.DB.Ingest(ctx, "test", 0, 3, f.Event(t, "event-2", "17", testutil.PM)))
 	bal, err := store.Balance(ctx, f.DB.DB, "allocation_available", f.Allocation)
 	require.NoError(t, err)
 	if bal.String() != "-17" {
@@ -160,19 +160,19 @@ func TestIngestExactMoneyReplayQuarantineOverdraw(t *testing.T) {
 	if rows[1]["status"] != "duplicate" || rows[2]["status"] != "quarantined" {
 		t.Fatal(rows)
 	}
-	next, _, _, err := f.DB.Checkpoint(ctx, "kafka", "test")
+	next, _, _, err := f.DB.Checkpoint(ctx, "kafka", store.KafkaStream("test", 0))
 	require.NoError(t, err)
 	if next != 4 {
 		t.Fatal(next)
 	}
-	if err := f.DB.Ingest(ctx, "test", 5, raw); err == nil {
+	if err := f.DB.Ingest(ctx, "test", 0, 5, raw); err == nil {
 		t.Fatal("gap accepted")
 	}
 	// A new connection resumes from the durable accounting checkpoint.
 	db, err := store.Open(ctx, f.Path, false)
 	require.NoError(t, err)
 	defer db.Close()
-	require.NoError(t, db.Ingest(ctx, "test", 3, f.Event(t, "event-2", "17", testutil.PM)))
+	require.NoError(t, db.Ingest(ctx, "test", 0, 3, f.Event(t, "event-2", "17", testutil.PM)))
 	assertBalanced(t, f.DB)
 }
 
@@ -180,10 +180,10 @@ func TestQuarantineBindingsAndConflictingID(t *testing.T) {
 	f := testutil.New(t, "100")
 	ctx := context.Background()
 	valid := f.Event(t, "event", "10", testutil.PM)
-	require.NoError(t, f.DB.Ingest(ctx, "test", 0, valid))
+	require.NoError(t, f.DB.Ingest(ctx, "test", 0, 0, valid))
 	variants := [][]byte{[]byte(strings.ReplaceAll(string(valid), `"10"`, `"20"`)), []byte(strings.ReplaceAll(string(f.Event(t, "unknown", "10", testutil.PM)), f.Session, "unknown")), []byte(strings.ReplaceAll(string(f.Event(t, "binding", "10", testutil.PM)), "state-1", "state-other")), []byte(strings.ReplaceAll(string(f.Event(t, "missing", "10", testutil.PM)), f.Session, ""))}
 	for i, raw := range variants {
-		require.NoError(t, f.DB.Ingest(ctx, "test", int64(i+1), raw))
+		require.NoError(t, f.DB.Ingest(ctx, "test", 0, int64(i+1), raw))
 	}
 	var quarantined int
 	require.NoError(t, f.DB.DB.QueryRow(`SELECT count(*) FROM usage_events WHERE status='quarantined'`).Scan(&quarantined))
@@ -382,10 +382,10 @@ func TestCreateKeyForGrantIsAtomicAndUsesAllocationDefaults(t *testing.T) {
 func TestRevocationReturnsOnlyUnspentAndLateChargeIsRecorded(t *testing.T) {
 	f := testutil.New(t, "100")
 	ctx := context.Background()
-	require.NoError(t, f.DB.Ingest(ctx, "test", 0, f.Event(t, "one", "40", testutil.PM)))
+	require.NoError(t, f.DB.Ingest(ctx, "test", 0, 0, f.Event(t, "one", "40", testutil.PM)))
 	require.NoError(t, f.DB.SetStatus(ctx, "allocation", f.Allocation, "revoked"))
 	require.NoError(t, f.DB.SetStatus(ctx, "allocation", f.Allocation, "revoked"))
-	require.NoError(t, f.DB.Ingest(ctx, "test", 1, f.Event(t, "late", "20", testutil.PM)))
+	require.NoError(t, f.DB.Ingest(ctx, "test", 0, 1, f.Event(t, "late", "20", testutil.PM)))
 	bal, err := store.Balance(ctx, f.DB.DB, "allocation_available", f.Allocation)
 	require.NoError(t, err)
 	if bal.String() != "-20" {
@@ -428,7 +428,7 @@ func TestConcurrentSpendsNeverLoseCharges(t *testing.T) {
 			db, err := store.Open(ctx, f.Path, false)
 			if err == nil {
 				defer db.Close()
-				err = db.Ingest(ctx, fmt.Sprint(i), 0, raw)
+				err = db.Ingest(ctx, fmt.Sprint(i), 0, 0, raw)
 			}
 			errs <- err
 		})

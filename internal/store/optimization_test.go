@@ -21,7 +21,7 @@ func TestBalancesHandleLargeAmountsAndOverdraw(t *testing.T) {
 	ctx := context.Background()
 	n, _ := new(big.Int).SetString(amount, 10)
 	n.Add(n, big.NewInt(1))
-	require.NoError(t, f.DB.Ingest(ctx, "events", 0, f.Event(t, "overdraw", n.String(), testutil.PM)))
+	require.NoError(t, f.DB.Ingest(ctx, "events", 0, 0, f.Event(t, "overdraw", n.String(), testutil.PM)))
 	b, err := store.Balance(ctx, f.DB.DB, "allocation_available", f.Allocation)
 	require.NoError(t, err)
 	if b.String() != "-1" {
@@ -34,7 +34,7 @@ func TestBalancesHandleLargeAmountsAndOverdraw(t *testing.T) {
 	}
 	testutil.AssertBalances(t, f.DB)
 	// Delayed usage must continue charging an already overdrawn allocation.
-	require.NoError(t, f.DB.Ingest(ctx, "events", 1, f.Event(t, "delayed", "2", testutil.PM)))
+	require.NoError(t, f.DB.Ingest(ctx, "events", 0, 1, f.Event(t, "delayed", "2", testutil.PM)))
 	b, err = store.Balance(ctx, f.DB.DB, "allocation_available", f.Allocation)
 	require.NoError(t, err)
 	if b.String() != "-3" {
@@ -50,7 +50,7 @@ func TestBalanceUpdateFailureRollsBackUsageAndFunding(t *testing.T) {
 	_, err = f.DB.DB.Exec(`CREATE TRIGGER fail_balance BEFORE UPDATE ON account_balances BEGIN SELECT RAISE(ABORT,'fixture failure'); END`)
 	require.NoError(t, err)
 	raw := f.Event(t, "retry", "20", testutil.PM)
-	if err := f.DB.Ingest(ctx, "events", 0, raw); err == nil {
+	if err := f.DB.Ingest(ctx, "events", 0, 0, raw); err == nil {
 		t.Fatal("usage survived balance update failure")
 	}
 	if err := f.DB.Fund(ctx, "grant", f.Grant, "50"); err == nil {
@@ -70,7 +70,7 @@ func TestBalanceUpdateFailureRollsBackUsageAndFunding(t *testing.T) {
 	testutil.AssertBalances(t, f.DB)
 	_, err = f.DB.DB.Exec(`DROP TRIGGER fail_balance`)
 	require.NoError(t, err)
-	require.NoError(t, f.DB.Ingest(ctx, "events", 0, raw))
+	require.NoError(t, f.DB.Ingest(ctx, "events", 0, 0, raw))
 }
 
 func activity(t *testing.T, db *store.Store, session, key string) (int64, int64) {

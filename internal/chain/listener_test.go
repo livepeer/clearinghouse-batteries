@@ -186,7 +186,7 @@ func TestRPCConfirmationDuplicateDelayedAttributionAndReorg(t *testing.T) {
 		}
 	}
 	pm := crypto.Keccak256Hash(common.LeftPadBytes(big.NewInt(1).Bytes(), 32)).Hex()
-	require.NoError(t, f.DB.Ingest(ctx, "test", 0, f.Event(t, "usage", "10", pm)))
+	require.NoError(t, f.DB.Ingest(ctx, "test", 0, 0, f.Event(t, "usage", "10", pm)))
 	rows, err = f.DB.List(ctx, "settlement", "")
 	require.NoError(t, err)
 	if rows[0]["match_status"] != "matched" || rows[0]["payment_session_id"] != f.Session || rows[0]["authorization_id"] != nil {
@@ -245,7 +245,7 @@ func TestAmbiguousSessionsAndDeepReorg(t *testing.T) {
 	l, api := newListener(t, f)
 	ctx := context.Background()
 	pm := crypto.Keccak256Hash(common.LeftPadBytes(big.NewInt(1).Bytes(), 32)).Hex()
-	require.NoError(t, f.DB.Ingest(ctx, "test", 0, f.Event(t, "first", "10", pm)))
+	require.NoError(t, f.DB.Ingest(ctx, "test", 0, 0, f.Event(t, "first", "10", pm)))
 	req := f.Request
 	state := *req.State
 	state.StateID = "state-2"
@@ -255,7 +255,7 @@ func TestAmbiguousSessionsAndDeepReorg(t *testing.T) {
 	second := f.Event(t, "second", "10", pm)
 	second = bytes.ReplaceAll(second, []byte(f.Session), []byte(d.AuthID))
 	second = bytes.ReplaceAll(second, []byte("state-1"), []byte("state-2"))
-	require.NoError(t, f.DB.Ingest(ctx, "test", 1, second))
+	require.NoError(t, f.DB.Ingest(ctx, "test", 0, 1, second))
 	api.logs = makeRedemptionLogs(t, api.headers[3], 1)
 	_, err = l.Step(ctx)
 	require.NoError(t, err)

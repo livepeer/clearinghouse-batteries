@@ -11,6 +11,7 @@ import (
 
 	"github.com/j0sh/minikafka"
 	"github.com/j0sh/minikafka/storage/memory"
+	"github.com/j0sh/minikafka/storage/sqlite"
 	"github.com/livepeer/clearinghouse/internal/store"
 	"github.com/livepeer/clearinghouse/internal/testutil"
 	kgo "github.com/segmentio/kafka-go"
@@ -46,7 +47,7 @@ func TestRealBrokerRestartAndReplay(t *testing.T) {
 	}
 	l, stop := start()
 	require.FileExists(t, filepath.Join(dir, "minikafka_+meta.db"))
-	require.FileExists(t, filepath.Join(dir, "minikafka_events.db"))
+	require.FileExists(t, filepath.Join(dir, "minikafka_events_0.db"))
 	raw := f.Event(t, "one", "70", testutil.PM)
 	// Match the writer configuration used by go-livepeer's monitor producer.
 	produce := func(l *Listener, values ...[]byte) {
@@ -62,12 +63,18 @@ func TestRealBrokerRestartAndReplay(t *testing.T) {
 		require.NoError(t, w.WriteMessages(ctx, messages...))
 	}
 	produce(l, raw)
-	testutil.Eventually(t, func() bool { n, _, _, _ := f.DB.Checkpoint(ctx, "kafka", "events"); return n == 1 })
+	testutil.Eventually(t, func() bool {
+		n, _, _, _ := f.DB.Checkpoint(ctx, "kafka", store.KafkaStream("events", 0))
+		return n == 1
+	})
 	stop()
 	l, stop = start()
 	defer stop()
 	produce(l, raw, []byte(`{"bad":true}`), f.Event(t, "two", "50", testutil.PM))
-	testutil.Eventually(t, func() bool { n, _, _, _ := f.DB.Checkpoint(ctx, "kafka", "events"); return n == 4 })
+	testutil.Eventually(t, func() bool {
+		n, _, _, _ := f.DB.Checkpoint(ctx, "kafka", store.KafkaStream("events", 0))
+		return n == 4
+	})
 	bal, err := store.Balance(ctx, f.DB.DB, "allocation_available", f.Allocation)
 	require.NoError(t, err)
 	if bal.String() != "-20" {
@@ -80,13 +87,138 @@ func TestRealBrokerRestartAndReplay(t *testing.T) {
 	}
 }
 
+func TestAllPartitionsRestartAndReplay(t *testing.T) {
+	f := testutil.New(t, "100")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	dir := t.TempDir()
+	backend, err := sqlite.Open(dir + string(filepath.Separator))
+	require.NoError(t, err)
+	require.NoError(t, backend.CreateTopic(ctx, "events", minikafka.TopicOptions{Partitions: 3}))
+	require.NoError(t, backend.Close())
+	start := func() (*minikafka.Broker, func()) {
+		t.Helper()
+		broker, err := OpenBroker(ctx, "127.0.0.1:0", "events", dir)
+		require.NoError(t, err)
+		listener := &Listener{DB: f.DB, Brokers: []string{broker.Addr()}, Topic: "events"}
+		runCtx, stop := context.WithCancel(ctx)
+		done := make(chan error, 2)
+		go func() { done <- broker.Serve(runCtx) }()
+		go func() { done <- listener.Run(runCtx) }()
+		closed := false
+		shutdown := func() {
+			t.Helper()
+			if closed {
+				return
+			}
+			closed = true
+			stop()
+			for range 2 {
+				select {
+				case err := <-done:
+					require.NoError(t, err)
+				case <-ctx.Done():
+					t.Fatal("partition readers did not stop")
+				}
+			}
+			require.NoError(t, broker.Close())
+			require.False(t, listener.Ready.Load())
+		}
+		t.Cleanup(shutdown)
+		testutil.Eventually(t, func() bool { return listener.Ready.Load() })
+		return broker, shutdown
+	}
+	checkpoint := func(partition int, want int64) {
+		t.Helper()
+		testutil.Eventually(t, func() bool {
+			next, _, _, err := f.DB.Checkpoint(ctx, "kafka", store.KafkaStream("events", partition))
+			return err == nil && next == want
+		})
+	}
+	broker, stop := start()
+	publish := func(partition int32, values ...[]byte) {
+		t.Helper()
+		for _, raw := range values {
+			_, err := broker.PublishToPartition(ctx, "events", partition, nil, raw)
+			require.NoError(t, err)
+		}
+	}
+	first := f.Event(t, "first", "10", testutil.PM)
+	second := f.Event(t, "second", "20", testutil.PM)
+	// Empty partition 0 must not block progress in another partition.
+	publish(2, first)
+	checkpoint(2, 1)
+	publish(1, second, []byte(`{"bad":true}`))
+	publish(0, first, f.Event(t, "third", "30", testutil.PM))
+	checkpoint(0, 2)
+	checkpoint(1, 2)
+	stop()
+	broker, stop = start()
+	publish(2, second, f.Event(t, "fourth", "5", testutil.PM))
+	publish(1, f.Event(t, "fifth", "7", testutil.PM))
+	checkpoint(2, 3)
+	checkpoint(1, 3)
+	stop()
+	for partition, want := range []int64{2, 3, 3} {
+		var count int64
+		require.NoError(t, f.DB.DB.QueryRow(`SELECT count(*) FROM usage_events WHERE partition=?`, partition).Scan(&count))
+		require.Equal(t, want, count)
+		checkpoint(partition, want)
+	}
+	var applied, duplicates, quarantined int
+	require.NoError(t, f.DB.DB.QueryRow(`SELECT count(*) FILTER (WHERE status='applied'),count(*) FILTER (WHERE status='duplicate'),count(*) FILTER (WHERE status='quarantined') FROM usage_events`).Scan(&applied, &duplicates, &quarantined))
+	require.Equal(t, 5, applied)
+	require.Equal(t, 2, duplicates)
+	require.Equal(t, 1, quarantined)
+	balance, err := store.Balance(ctx, f.DB.DB, "allocation_available", f.Allocation)
+	require.NoError(t, err)
+	require.Equal(t, "28", balance.String())
+}
+
+func TestConsumerFailureStopsAllPartitions(t *testing.T) {
+	f := testutil.New(t, "100")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	backend := memory.Open()
+	require.NoError(t, backend.CreateTopic(ctx, "events", minikafka.TopicOptions{Partitions: 3}))
+	broker, err := minikafka.Open(minikafka.Config{Addr: "127.0.0.1:0", Store: backend})
+	require.NoError(t, err)
+	listener := &Listener{DB: f.DB, Brokers: []string{broker.Addr()}, Topic: "events"}
+	brokerDone, listenerDone := make(chan error, 1), make(chan error, 1)
+	go func() { brokerDone <- broker.Serve(ctx) }()
+	go func() { listenerDone <- listener.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		require.NoError(t, broker.Close())
+		select {
+		case err := <-brokerDone:
+			require.NoError(t, err)
+		case <-time.After(5 * time.Second):
+			t.Error("broker did not stop")
+		}
+	})
+	testutil.Eventually(t, func() bool { return listener.Ready.Load() })
+	// A fatal write on one partition must stop the other readers, including idle ones.
+	_, err = f.DB.DB.Exec(`CREATE TRIGGER fail_usage BEFORE INSERT ON usage_events BEGIN SELECT RAISE(ABORT,'fixture failure'); END`)
+	require.NoError(t, err)
+	_, err = broker.PublishToPartition(ctx, "events", 2, nil, f.Event(t, "fail", "10", testutil.PM))
+	require.NoError(t, err)
+	select {
+	case err := <-listenerDone:
+		require.ErrorContains(t, err, "fixture failure")
+	case <-ctx.Done():
+		t.Fatal("partition readers did not stop after a failed write")
+	}
+	require.False(t, listener.Ready.Load())
+}
+
 func TestBrokerUsesDirectoryPathVerbatim(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "data.v1")
 	broker, err := OpenBroker(context.Background(), "127.0.0.1:0", "events", dir)
 	require.NoError(t, err)
 	require.NoError(t, broker.Close())
 	require.FileExists(t, filepath.Join(dir, "minikafka_+meta.db"))
-	require.FileExists(t, filepath.Join(dir, "minikafka_events.db"))
+	require.FileExists(t, filepath.Join(dir, "minikafka_events_0.db"))
 }
 
 func TestBrokerUsesCurrentDirectory(t *testing.T) {
@@ -95,7 +227,7 @@ func TestBrokerUsesCurrentDirectory(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, broker.Close())
 	require.FileExists(t, "minikafka_+meta.db")
-	require.FileExists(t, "minikafka_events.db")
+	require.FileExists(t, "minikafka_events_0.db")
 }
 
 func TestBrokerConcurrentPublishAndShutdown(t *testing.T) {
@@ -205,12 +337,15 @@ func TestBrokerConcurrentPublishAndShutdown(t *testing.T) {
 
 func TestConsumerRejectsLostOffsets(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		next   int64
-		retain int64
+		name      string
+		next      int64
+		retain    int64
+		partition int
 	}{
-		{"retention passed checkpoint", 0, 1},
-		{"checkpoint beyond broker", 3, 0},
+		{"retention passed checkpoint", 0, 1, 0},
+		{"checkpoint beyond broker", 3, 0, 0},
+		{"partition 2 retention passed checkpoint", 0, 1, 2},
+		{"partition 2 checkpoint beyond broker", 3, 0, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := testutil.New(t, "100")
@@ -218,8 +353,8 @@ func TestConsumerRejectsLostOffsets(t *testing.T) {
 			defer cancel()
 			backend := memory.Open()
 			require.NoError(t, backend.Init(ctx))
-			require.NoError(t, backend.CreateTopic(ctx, "events", minikafka.TopicOptions{Retention: minikafka.RetentionPolicy{MaxMessages: tc.retain}}))
-			_, err := backend.Append(ctx, minikafka.AppendRequest{Topic: "events", Records: []minikafka.Record{{Value: []byte("one")}, {Value: []byte("two")}}})
+			require.NoError(t, backend.CreateTopic(ctx, "events", minikafka.TopicOptions{Partitions: 3, Retention: minikafka.RetentionPolicy{MaxMessages: tc.retain}}))
+			_, err := backend.Append(ctx, minikafka.AppendRequest{Topic: "events", Partition: int32(tc.partition), Records: []minikafka.Record{{Value: []byte("one")}, {Value: []byte("two")}}})
 			require.NoError(t, err)
 			require.NoError(t, backend.ApplyRetention(ctx, "events"))
 			broker, err := minikafka.Open(minikafka.Config{Addr: testutil.Port(t), Store: backend})
@@ -228,7 +363,7 @@ func TestConsumerRejectsLostOffsets(t *testing.T) {
 			go func() { done <- broker.Serve(ctx) }()
 			defer func() { cancel(); broker.Close(); require.NoError(t, <-done) }()
 			require.NoError(t, f.DB.Write(ctx, func(tx *sql.Tx) error {
-				return store.SetCheckpoint(ctx, tx, "kafka", "events", tc.next, "")
+				return store.SetCheckpoint(ctx, tx, "kafka", store.KafkaStream("events", tc.partition), tc.next, "")
 			}))
 
 			l := &Listener{DB: f.DB, Brokers: []string{broker.Addr()}, Topic: "events"}
@@ -240,7 +375,7 @@ func TestConsumerRejectsLostOffsets(t *testing.T) {
 			if l.Ready.Load() {
 				t.Fatal("failed consumer is ready")
 			}
-			next, _, _, err := f.DB.Checkpoint(ctx, "kafka", "events")
+			next, _, _, err := f.DB.Checkpoint(ctx, "kafka", store.KafkaStream("events", tc.partition))
 			require.NoError(t, err)
 			if next != tc.next {
 				t.Fatal("failure changed checkpoint", next)

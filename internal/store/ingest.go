@@ -37,15 +37,24 @@ type SignedTicketEvent struct {
 	Pixels          json.Number `json:"pixels"`
 }
 
+// KafkaStream identifies a topic/partition checkpoint.
+func KafkaStream(topic string, partition int) string {
+	return fmt.Sprintf("%s:%d", topic, partition)
+}
+
 // Ingest commits an audit record, any financial postings, and the next Kafka offset together.
-func (s *Store) Ingest(ctx context.Context, topic string, offset int64, raw []byte) error {
+func (s *Store) Ingest(ctx context.Context, topic string, partition int, offset int64, raw []byte) error {
+	if partition < 0 || partition > math.MaxInt32 {
+		return errors.New("invalid Kafka partition")
+	}
 	if offset < 0 || offset == math.MaxInt64 {
 		return errors.New("invalid Kafka offset")
 	}
 	var outcome, detail, overdraw string
+	stream := KafkaStream(topic, partition)
 	err := s.Write(ctx, func(tx *sql.Tx) error {
 		var next int64
-		err := tx.QueryRowContext(ctx, `SELECT next_position FROM ingestion_checkpoints WHERE source='kafka' AND stream=?`, topic).Scan(&next)
+		err := tx.QueryRowContext(ctx, `SELECT next_position FROM ingestion_checkpoints WHERE source='kafka' AND stream=?`, stream).Scan(&next)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
@@ -53,7 +62,7 @@ func (s *Store) Ingest(ctx context.Context, topic string, offset int64, raw []by
 			return nil
 		}
 		if offset > next {
-			return fmt.Errorf("Kafka offset gap: expected %d, received %d", next, offset)
+			return fmt.Errorf("Kafka offset gap for %s partition %d: expected %d, received %d", topic, partition, next, offset)
 		}
 		uid, now := ID(), time.Now().UnixMilli()
 		status, reason := "applied", ""
@@ -107,7 +116,7 @@ func (s *Store) Ingest(ctx context.Context, topic string, offset int64, raw []by
 				}
 			}
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO usage_events VALUES (?,?,?,0,?,?,?,?,?,?,?,?,?,?,?,?,?)`, uid, eventID, topic, offset, raw, sessionID, ev.Pipeline, ev.RequestID, ev.Started, ev.Ended, string(ev.BillableSeconds), string(ev.Pixels), ev.ComputedFee, status, reason, now); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO usage_events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, uid, eventID, topic, partition, offset, raw, sessionID, ev.Pipeline, ev.RequestID, ev.Started, ev.Ended, string(ev.BillableSeconds), string(ev.Pixels), ev.ComputedFee, status, reason, now); err != nil {
 			return err
 		}
 		outcome, detail = status, reason
@@ -136,18 +145,18 @@ func (s *Store) Ingest(ctx context.Context, topic string, offset int64, raw []by
 				return err
 			}
 		}
-		return SetCheckpoint(ctx, tx, "kafka", topic, offset+1, "")
+		return SetCheckpoint(ctx, tx, "kafka", stream, offset+1, "")
 	})
 	if err == nil {
 		if outcome == "quarantined" {
-			slog.Warn("usage quarantined", "topic", topic, "offset", offset, "reason", detail)
+			slog.Warn("usage quarantined", "topic", topic, "partition", partition, "offset", offset, "reason", detail)
 		}
 		if overdraw != "" {
 			available, conversionErr := units.WeiToETH(overdraw)
 			if conversionErr != nil {
-				slog.Error("allocation overdraw amount invalid", "topic", topic, "offset", offset, "error", conversionErr)
+				slog.Error("allocation overdraw amount invalid", "topic", topic, "partition", partition, "offset", offset, "error", conversionErr)
 			} else {
-				slog.Warn("allocation overdraw recorded", "topic", topic, "offset", offset, "available_eth", available)
+				slog.Warn("allocation overdraw recorded", "topic", topic, "partition", partition, "offset", offset, "available_eth", available)
 			}
 		}
 	}

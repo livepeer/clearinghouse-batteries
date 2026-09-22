@@ -378,7 +378,7 @@ func TestAllComponentCombinations(t *testing.T) {
 						return false
 					}
 					defer db.Close()
-					next, _, _, err := db.Checkpoint(ctx, "kafka", p.KafkaTopic)
+					next, _, _, err := db.Checkpoint(ctx, "kafka", store.KafkaStream(p.KafkaTopic, 0))
 					return err == nil && next == 1
 				})
 				if _, err := os.Stat(p.DBPath + ".accounting.lock"); err != nil {
@@ -392,7 +392,7 @@ func TestAllComponentCombinations(t *testing.T) {
 				}
 			}
 			if p.EnableKafka {
-				for _, name := range []string{"minikafka_+meta.db", "minikafka_events.db"} {
+				for _, name := range []string{"minikafka_+meta.db", "minikafka_events_0.db"} {
 					if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 						t.Fatalf("embedded broker database is not beside accounting database: %s: %v", name, err)
 					}
@@ -482,7 +482,7 @@ func TestCLIEscrowCommands(t *testing.T) {
 		t.Fatal(got)
 	}
 
-	require.NoError(t, f.DB.Ingest(ctx, "test", 0, f.Event(t, "usage-output", "7", testutil.PM)))
+	require.NoError(t, f.DB.Ingest(ctx, "test", 0, 0, f.Event(t, "usage-output", "7", testutil.PM)))
 	if got := cli(t, "usage", "list"); !strings.Contains(got, `"computed_fee_eth": "0.000000000000000007"`) || strings.Contains(got, "_wei") {
 		t.Fatal(got)
 	}

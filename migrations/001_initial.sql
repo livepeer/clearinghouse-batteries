@@ -32,7 +32,7 @@ CREATE TABLE payment_sessions (
 ) STRICT;
 CREATE INDEX sessions_allocation ON payment_sessions(allocation_id);
 CREATE TABLE usage_events (
- id TEXT PRIMARY KEY, event_id TEXT UNIQUE, topic TEXT NOT NULL, partition INTEGER NOT NULL CHECK(partition=0), offset INTEGER NOT NULL CHECK(offset>=0),
+ id TEXT PRIMARY KEY, event_id TEXT UNIQUE, topic TEXT NOT NULL, partition INTEGER NOT NULL CHECK(partition>=0 AND partition<=2147483647), offset INTEGER NOT NULL CHECK(offset>=0),
  raw_payload BLOB NOT NULL, payment_session_id TEXT REFERENCES payment_sessions(id),
  pipeline TEXT, request_id TEXT, started_at_ms INTEGER, ended_at_ms INTEGER, billable_seconds TEXT, pixels TEXT, computed_fee_wei TEXT,
  status TEXT NOT NULL CHECK(status IN ('applied','quarantined','ignored','duplicate')), error TEXT NOT NULL DEFAULT '', created_at_ms INTEGER NOT NULL,
