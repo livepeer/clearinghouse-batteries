@@ -41,7 +41,7 @@ type CreateParams struct {
 	Beneficiary string `optional:"true" descr:"Allocation beneficiary label"`
 	GrantID     string `optional:"true" descr:"Parent grant ID (required for allocations)"`
 	Status      string `optional:"true" descr:"Initial status"`
-	Metadata    string `default:"{}" descr:"JSON metadata"`
+	Metadata    string `optional:"true" descr:"Opaque metadata text"`
 	StartsAt    string `optional:"true" descr:"RFC3339 start time"`
 	EndsAt      string `optional:"true" descr:"RFC3339 end time"`
 }

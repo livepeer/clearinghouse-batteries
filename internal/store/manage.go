@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -61,12 +60,6 @@ func (s *Store) Create(ctx context.Context, kind string, p Create) (string, erro
 func prepareCreate(p *Create) error {
 	if strings.TrimSpace(p.Name) == "" {
 		return invalidInput("name is required")
-	}
-	if p.Metadata == "" {
-		p.Metadata = "{}"
-	}
-	if !json.Valid([]byte(p.Metadata)) {
-		return invalidInput("invalid metadata JSON")
 	}
 	if p.Starts != nil && p.Ends != nil && *p.Ends <= *p.Starts {
 		return invalidInput("ends must follow starts")

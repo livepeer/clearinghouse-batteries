@@ -56,20 +56,23 @@ func managementForm(t *testing.T, fields map[string]string) (string, string) {
 func TestManagementRoutes(t *testing.T) {
 	f := testutil.New(t, "100")
 	handler := managementHandler(context.Background(), f.DB)
-	grant := managementObject(t, managementRequest(t, handler, "POST", "/v1/grants", "application/json", `{"name":"HTTP grant","amount_eth":"1.000000000000000001","status":"active","metadata":"{\"owner\":\"team\"}"}`), 201)
+	grant := managementObject(t, managementRequest(t, handler, "POST", "/v1/grants", "application/json", `{"name":"HTTP grant","amount_eth":"1.000000000000000001","status":"active","metadata":"not JSON: {bad}"}`), 201)
 	grantID := grant["id"].(string)
 	row := managementObject(t, managementRequest(t, handler, "GET", "/v1/grants/"+grantID, "", ""), 200)
 	require.Equal(t, "1.000000000000000001", row["total_eth"])
-	require.Equal(t, `{"owner":"team"}`, row["metadata"])
+	require.Equal(t, "not JSON: {bad}", row["metadata"])
 	require.NotContains(t, row, "total_wei")
 	require.Len(t, managementArray(t, managementRequest(t, handler, "GET", "/v1/grants", "", ""), 200), 2)
 
-	contentType, form := managementForm(t, map[string]string{"grant_id": grantID, "name": "HTTP allocation", "amount_eth": "0.5"})
+	contentType, form := managementForm(t, map[string]string{"grant_id": grantID, "name": "HTTP allocation", "amount_eth": "0.5", "metadata": "opaque allocation\n{bad"})
 	allocation := managementObject(t, managementRequest(t, handler, "POST", "/v1/allocations", contentType, form), 201)
 	allocationID := allocation["id"].(string)
 	row = managementObject(t, managementRequest(t, handler, "GET", "/v1/allocations/"+allocationID, "", ""), 200)
 	require.Equal(t, "0.5", row["allocated_eth"])
+	require.Equal(t, "opaque allocation\n{bad", row["metadata"])
 	require.Len(t, managementArray(t, managementRequest(t, handler, "GET", "/v1/allocations", "", ""), 200), 2)
+	require.Equal(t, "", managementObject(t, managementRequest(t, handler, "GET", "/v1/grants/"+f.Grant, "", ""), 200)["metadata"])
+	require.Equal(t, "", managementObject(t, managementRequest(t, handler, "GET", "/v1/allocations/"+f.Allocation, "", ""), 200)["metadata"])
 
 	fund := url.Values{"amount_eth": {"0.5"}}.Encode()
 	managementObject(t, managementRequest(t, handler, "POST", "/v1/grants/"+grantID+"/fund", "application/x-www-form-urlencoded", fund), 200)
@@ -135,7 +138,7 @@ func TestManagementErrors(t *testing.T) {
 		{"POST", "/v1/allocations", "application/json", `{"name":"missing","grant_id":"missing","amount_eth":"1"}`, 404},
 		{"POST", "/v1/allocations", "application/json", fmt.Sprintf(`{"name":"too much","grant_id":%q,"amount_eth":"1"}`, f.Grant), 409},
 		{"POST", "/v1/grants", "application/json", `{"name":"bad","amount_eth":"1e2"}`, 400},
-		{"POST", "/v1/grants", "application/json", `{"name":"bad","metadata":"not JSON"}`, 400},
+		{"POST", "/v1/grants", "application/json", `{"name":"bad","metadata":{"nested":"object"}}`, 400},
 		{"POST", "/v1/grants", "application/json", `{"name":"bad","amount_eth":1}`, 400},
 		{"POST", "/v1/grants", "application/json", `{"name":"bad","extra":"value"}`, 400},
 		{"POST", "/v1/grants", "application/json", `{"name":`, 400},

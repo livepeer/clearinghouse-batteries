@@ -67,10 +67,18 @@ func TestMigrationsConstraintsAndRoundTrip(t *testing.T) {
 			t.Fatalf("constraint allowed %s", q)
 		}
 	}
-	for _, q := range []string{`UPDATE grants SET total_wei='01'`, `UPDATE grants SET metadata='{bad'`, `UPDATE grant_allocations SET status='unknown'`, `UPDATE payment_sessions SET orchestrator='0xgggggggggggggggggggggggggggggggggggggggg'`, `UPDATE api_keys SET secret_hash=zeroblob(31)`} {
+	for _, q := range []string{`UPDATE grants SET total_wei='01'`, `UPDATE grant_allocations SET status='unknown'`, `UPDATE payment_sessions SET orchestrator='0xgggggggggggggggggggggggggggggggggggggggg'`, `UPDATE api_keys SET secret_hash=zeroblob(31)`} {
 		if _, err := f.DB.DB.ExecContext(ctx, q); err == nil {
 			t.Fatalf("check allowed %s", q)
 		}
+	}
+	for _, q := range []string{
+		`INSERT INTO grants(id,name,total_wei,status,created_at_ms) VALUES ('defaults-grant','defaults','0','draft',0) RETURNING metadata`,
+		`INSERT INTO grant_allocations(id,grant_id,name,allocated_wei,status,created_at_ms) VALUES ('defaults-allocation','defaults-grant','defaults','0','exhausted',0) RETURNING metadata`,
+	} {
+		var metadata string
+		require.NoError(t, f.DB.DB.QueryRowContext(ctx, q).Scan(&metadata), q)
+		require.Equal(t, "", metadata, q)
 	}
 	for _, index := range []string{"allocations_grant", "keys_allocation", "sessions_allocation", "usage_status", "signing_match", "ledger_account", "ledger_transaction", "settlements_match", "settlements_block", "ticket_broker_events_block", "ticket_broker_events_sender"} {
 		var n int
@@ -373,7 +381,7 @@ func TestCreateKeyForGrantIsAtomicAndUsesAllocationDefaults(t *testing.T) {
 	var name, beneficiary, amount, metadata, allocationStatus string
 	var starts, ends any
 	require.NoError(t, f.DB.DB.QueryRow(`SELECT name,beneficiary,allocated_wei,metadata,starts_at_ms,ends_at_ms,status FROM grant_allocations WHERE id=?`, allocation).Scan(&name, &beneficiary, &amount, &metadata, &starts, &ends, &allocationStatus))
-	if name != "gateway" || beneficiary != "" || amount != "50" || metadata != "{}" || starts != nil || ends != nil || allocationStatus != "active" {
+	if name != "gateway" || beneficiary != "" || amount != "50" || metadata != "" || starts != nil || ends != nil || allocationStatus != "active" {
 		t.Fatal(name, beneficiary, amount, metadata, starts, ends, allocationStatus)
 	}
 	assertBalanced(t, f.DB)

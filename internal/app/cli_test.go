@@ -50,8 +50,14 @@ func object(t *testing.T, s string) map[string]string {
 func TestCLIManagementAndSecretOnce(t *testing.T) {
 	t.Setenv("CLEARINGHOUSE_DB_PATH", filepath.Join(t.TempDir(), "accounts.db"))
 	cli(t, "migrate", "up")
-	g := object(t, cli(t, "grant", "create", "--name", "grant", "--amount-eth", "1", "--status", "active"))["id"]
-	a := object(t, cli(t, "allocation", "create", "--name", "allocation", "--grant-id", g, "--amount-eth", "0.5"))["id"]
+	g := object(t, cli(t, "grant", "create", "--name", "grant", "--amount-eth", "1", "--status", "active", "--metadata", "not JSON: {bad}"))["id"]
+	a := object(t, cli(t, "allocation", "create", "--name", "allocation", "--grant-id", g, "--amount-eth", "0.5", "--metadata", "opaque allocation\n{bad"))["id"]
+	for _, tc := range []struct{ kind, id, want string }{{"grant", g, "not JSON: {bad}"}, {"allocation", a, "opaque allocation\n{bad"}} {
+		var rows []map[string]any
+		require.NoError(t, json.Unmarshal([]byte(cli(t, tc.kind, "show", "--id", tc.id)), &rows))
+		require.Len(t, rows, 1)
+		require.Equal(t, tc.want, rows[0]["metadata"])
+	}
 	k := object(t, cli(t, "api-key", "create", "--allocation-id", a, "--name", "gateway"))
 	if k["allocation_id"] != a {
 		t.Fatal(k)
@@ -64,14 +70,14 @@ func TestCLIManagementAndSecretOnce(t *testing.T) {
 		t.Fatal("secret leaked")
 	}
 	for _, args := range [][]string{
-		{"grant", "list"}, {"grant", "show", "--id", g},
+		{"grant", "list"},
 		{"grant", "fund", "--id", g, "--amount-eth", "0.5"},
 		{"allocation", "fund", "--id", a, "--amount-eth", "0.25"},
 		{"allocation", "set-status", "--id", a, "--status", "paused"},
 		{"allocation", "set-status", "--id", a, "--status", "active"},
 		{"grant", "set-status", "--id", g, "--status", "paused"},
 		{"grant", "set-status", "--id", g, "--status", "active"},
-		{"allocation", "list"}, {"allocation", "show", "--id", a},
+		{"allocation", "list"},
 		{"api-key", "revoke", "--id", k["id"]},
 		{"allocation", "revoke", "--id", a}, {"session", "list"},
 		{"settlement", "list"}, {"escrow", "report"}, {"escrow", "activity"}, {"usage", "list"}, {"migrate", "status"},
@@ -96,14 +102,20 @@ func TestCLIAllocationAllAndKeyAutoAllocation(t *testing.T) {
 	t.Setenv("CLEARINGHOUSE_DB_PATH", filepath.Join(t.TempDir(), "accounts.db"))
 	cli(t, "migrate", "up")
 	g := object(t, cli(t, "grant", "create", "--name", "grant", "--amount-eth", "2", "--status", "active"))["id"]
+	var grants []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(cli(t, "grant", "show", "--id", g)), &grants))
+	require.Len(t, grants, 1)
+	require.Equal(t, "", grants[0]["metadata"])
 	k := object(t, cli(t, "api-key", "create", "--grant-id", g, "--name", "gateway", "--amount-eth", "all"))
 	if k["allocation_id"] == "" || !strings.HasPrefix(k["api_key"], "lpg_"+k["id"]+"_") {
 		t.Fatal(k)
 	}
-	allocation := cli(t, "allocation", "show", "--id", k["allocation_id"])
-	if !strings.Contains(allocation, `"name": "gateway"`) || !strings.Contains(allocation, `"allocated_eth": "2"`) {
-		t.Fatal(allocation)
-	}
+	var allocationRows []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(cli(t, "allocation", "show", "--id", k["allocation_id"])), &allocationRows))
+	require.Len(t, allocationRows, 1)
+	require.Equal(t, "gateway", allocationRows[0]["name"])
+	require.Equal(t, "2", allocationRows[0]["allocated_eth"])
+	require.Equal(t, "", allocationRows[0]["metadata"])
 	empty := object(t, cli(t, "api-key", "create", "--grant-id", g, "--name", "empty-gateway", "--amount-eth", "all"))
 	if got := cli(t, "allocation", "show", "--id", empty["allocation_id"]); !strings.Contains(got, `"allocated_eth": "0"`) || !strings.Contains(got, `"status": "exhausted"`) {
 		t.Fatal(got)

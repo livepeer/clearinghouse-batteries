@@ -4,7 +4,7 @@ CREATE TABLE grants (
  total_wei TEXT NOT NULL CHECK(total_wei <> '' AND total_wei NOT GLOB '*[^0-9]*' AND (total_wei='0' OR substr(total_wei,1,1)<>'0')),
  starts_at_ms INTEGER, ends_at_ms INTEGER,
  status TEXT NOT NULL CHECK(status IN ('draft','active','paused','closed')),
- metadata TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(metadata)), created_at_ms INTEGER NOT NULL,
+ metadata TEXT NOT NULL DEFAULT '', created_at_ms INTEGER NOT NULL,
  CHECK(starts_at_ms IS NULL OR ends_at_ms IS NULL OR ends_at_ms > starts_at_ms)
 ) STRICT;
 CREATE TABLE grant_allocations (
@@ -12,7 +12,7 @@ CREATE TABLE grant_allocations (
  allocated_wei TEXT NOT NULL CHECK(allocated_wei <> '' AND allocated_wei NOT GLOB '*[^0-9]*' AND (allocated_wei='0' OR substr(allocated_wei,1,1)<>'0')),
  starts_at_ms INTEGER, ends_at_ms INTEGER,
  status TEXT NOT NULL CHECK(status IN ('active','paused','exhausted','revoked')),
- metadata TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(metadata)), created_at_ms INTEGER NOT NULL,
+ metadata TEXT NOT NULL DEFAULT '', created_at_ms INTEGER NOT NULL,
  CHECK(starts_at_ms IS NULL OR ends_at_ms IS NULL OR ends_at_ms > starts_at_ms)
 ) STRICT;
 CREATE INDEX allocations_grant ON grant_allocations(grant_id);
