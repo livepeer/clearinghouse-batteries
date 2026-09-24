@@ -14,6 +14,8 @@ security-sensitive.
   with a firewall.
 - `--unsafe-http-bind` only permits a non-loopback bind. It does not enable TLS
   or otherwise secure the connection.
+- The management HTTP API has no authentication. Keep it on loopback or behind
+  an authenticated tunnel or proxy, and restrict access to trusted operators.
 - Kafka connections are unencrypted and unauthenticated. Keep Kafka on loopback
   or a trusted private network. Use an authenticated encrypted tunnel when
   traffic must cross hosts.
@@ -32,6 +34,8 @@ security-sensitive.
 - API-key creation displays the key only once. Store it immediately in a secret
   manager, avoid capturing it in shell history or CI logs, and revoke keys that
   may have been disclosed.
+- Management API key creation also returns the secret once. Prevent proxies and
+  HTTP clients from logging response bodies containing new keys.
 - Use a separate API key for each gateway or deployment so credentials can be
   rotated or revoked independently.
 

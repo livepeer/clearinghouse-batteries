@@ -109,6 +109,7 @@ After signing requests, inspect the account balances:
 `serve` can run any combination of these components:
 
 - `--enable-auth-webhook `:PORT` — signer authorization HTTP server;
+- `--enable-management-api `:PORT` — account management HTTP API;
 - `--enable-kafka` — embedded Kafka broker;
 - `--enable-accounting` — accounting service;
 - `--enable-onchain-listener` — on-chain payment listener.
@@ -116,6 +117,7 @@ After signing requests, inspect the account balances:
 Enable at least one component. Enable both `--enable-kafka` and
 `--enable-accounting` to use the embedded broker with the accounting service;
 the connection is configured automatically. The broker can also run independently.
+The management API can run on its own or alongside the other components.
 
 To run the accounting service with an external Kafka broker:
 
@@ -218,7 +220,7 @@ Run `./bin/clearinghouse --help` to list available commands. Run
 `./bin/clearinghouse <command> --help` for its subcommands, options,
 environment variables, and defaults.
 
-- `serve` — Run the authorization, Kafka, accounting, and on-chain services.
+- `serve` — Run the authorization, management, Kafka, accounting, and on-chain services.
 - `grant` — Create and manage grant budgets.
 - `allocation` — Divide grants into allocations and manage their funding and status.
 - `api-key` — Create, list, and revoke API keys.
@@ -284,15 +286,61 @@ The `--enable-auth-webhook` flag surfaces these endpoints:
 The authorization webhook has no default bind and requires at least a port.
 `--enable-auth-webhook :8080` enables it on `127.0.0.1:8080`. Bind addresses
 must be IPv4 or bracketed IPv6 literals. Non-loopback and wildcard addresses
-additionally require `--unsafe-http-bind`. Cross-network access usually
-requires a terminating TLS proxy in front of the clearinghouse.
+additionally require `--unsafe-http-bind`. Remote access usually requires a
+terminating TLS proxy in front of the port.
 
 A webhook token is also required; specify via CLEARINGHOUSE_WEBHOOK_TOKEN and
 configure go-livepeer as indicated in [Connect go-livepeer](#Connect-go-livepeer).
 
+### Management HTTP API
+
+Enable the management listener on a port distinct from the webhook:
+
+```sh
+./bin/clearinghouse serve --enable-management-api :8081
+```
+
+The management API has no authentication and no default bind.
+`--enable-management-api :8081` listens on `127.0.0.1:8081`. Bind addresses
+must be IPv4 or bracketed IPv6 literals. Non-loopback and wildcard addresses
+require `--unsafe-http-bind`; that flag does not add TLS or access control.
+Remote access usually requires a terminating TLS proxy in front of the port.
+
+Management routes are versioned under `/v1`:
+
+| Resources | Routes |
+| --- | --- |
+| Grants | `GET, POST /v1/grants`; `GET /v1/grants/{id}`; `POST /v1/grants/{id}/fund`; `PATCH /v1/grants/{id}/status` |
+| Allocations | `GET, POST /v1/allocations`; `GET /v1/allocations/{id}`; `POST /v1/allocations/{id}/fund`; `PATCH /v1/allocations/{id}/status`; `POST /v1/allocations/{id}/revoke` |
+| API keys | `GET, POST /v1/api-keys`; `POST /v1/api-keys/{id}/revoke` |
+| Sessions | `GET /v1/sessions`; `GET /v1/sessions/{id}`; `POST /v1/sessions/{id}/revoke` |
+| Reports | `GET /v1/settlements`, `/v1/usage`, `/v1/ledger/report`, `/v1/escrow/report`, `/v1/escrow/activity` |
+| Health | `GET /livez`, `GET /readyz` |
+
+Input bodies accept `multipart/form-data`, `application/x-www-form-urlencoded`,
+and JSON. Field names are snake_case. Amounts use exact decimal
+ETH strings in `amount_eth`; allocation funding also accepts `all`. For example:
+
+```sh
+curl -F name='Developer grants' -F amount_eth=1 -F status=active \
+  http://127.0.0.1:8081/v1/grants
+
+curl -H 'Content-Type: application/json' \
+  -d '{"grant_id":"GRANT_ID","name":"gateway","amount_eth":"0.1"}' \
+  http://127.0.0.1:8081/v1/api-keys
+```
+
+The API returns the same resource field names and types as the CLI JSON,
+including `*_eth` strings, millisecond timestamps, and string-valued
+`metadata`. An item route returns one object. API key creation returns the
+secret once; subsequent lists omit it. Lists have no filtering or pagination.
+Migrations remain CLI-only. Error responses contain an `error` string and use
+400 for invalid input, 404 for missing resources, 409 for state or balance
+conflicts, and 500 for unexpected failures.
+
 ## Development
 
-Building requires Go 1.27.1, CGO, and a C compiler.
+Building requires Go 1.27.1, CGO, and a C compiler for SQLite.
 
 ```sh
 make build

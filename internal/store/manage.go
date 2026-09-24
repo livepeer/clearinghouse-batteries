@@ -19,6 +19,25 @@ type Create struct {
 	Starts, Ends                                                  *int64
 }
 
+var ErrInvalidManagementInput = errors.New("invalid management input")
+var ErrManagementConflict = errors.New("management conflict")
+
+type managementError struct {
+	kind    error
+	message string
+}
+
+func (e managementError) Error() string { return e.message }
+func (e managementError) Unwrap() error { return e.kind }
+
+func invalidInput(message string) error {
+	return managementError{ErrInvalidManagementInput, message}
+}
+
+func stateConflict(message string) error {
+	return managementError{ErrManagementConflict, message}
+}
+
 func (s *Store) Create(ctx context.Context, kind string, p Create) (string, error) {
 	if err := prepareCreate(&p); err != nil {
 		return "", err
@@ -41,16 +60,16 @@ func (s *Store) Create(ctx context.Context, kind string, p Create) (string, erro
 
 func prepareCreate(p *Create) error {
 	if strings.TrimSpace(p.Name) == "" {
-		return errors.New("name is required")
+		return invalidInput("name is required")
 	}
 	if p.Metadata == "" {
 		p.Metadata = "{}"
 	}
 	if !json.Valid([]byte(p.Metadata)) {
-		return errors.New("invalid metadata JSON")
+		return invalidInput("invalid metadata JSON")
 	}
 	if p.Starts != nil && p.Ends != nil && *p.Ends <= *p.Starts {
-		return errors.New("ends must follow starts")
+		return invalidInput("ends must follow starts")
 	}
 	return nil
 }
@@ -65,7 +84,7 @@ func createGrant(ctx context.Context, tx *sql.Tx, p Create) (string, error) {
 		p.Status = "draft"
 	}
 	if !oneOf(p.Status, "draft", "active", "paused") {
-		return "", errors.New("initial grant status must be draft, active, or paused")
+		return "", invalidInput("initial grant status must be draft, active, or paused")
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO grants VALUES (?,?,?,?,?,?,?,?,?)`, id, p.Name, p.Sponsor, n.String(), p.Starts, p.Ends, p.Status, p.Metadata, time.Now().UnixMilli()); err != nil {
 		return "", err
@@ -86,7 +105,7 @@ func createAllocation(ctx context.Context, tx *sql.Tx, p Create) (string, error)
 		return "", err
 	}
 	if status == "closed" {
-		return "", errors.New("grant is closed")
+		return "", stateConflict("grant is closed")
 	}
 	available, err := Balance(ctx, tx, "grant_unallocated", p.GrantID)
 	if err != nil {
@@ -97,13 +116,13 @@ func createAllocation(ctx context.Context, tx *sql.Tx, p Create) (string, error)
 		return "", err
 	}
 	if available.Cmp(n) < 0 {
-		return "", errors.New("insufficient unallocated grant balance")
+		return "", stateConflict("insufficient unallocated grant balance")
 	}
 	if p.Status == "" {
 		p.Status = "active"
 	}
 	if !oneOf(p.Status, "active", "paused") {
-		return "", errors.New("initial allocation status must be active or paused")
+		return "", invalidInput("initial allocation status must be active or paused")
 	}
 	if p.Status == "active" && n.Sign() == 0 {
 		p.Status = "exhausted"
@@ -122,7 +141,7 @@ func (s *Store) Fund(ctx context.Context, kind, id, value string) error {
 			return err
 		}
 		if n.Sign() == 0 {
-			return errors.New("funding must be positive")
+			return invalidInput("funding must be positive")
 		}
 		return s.fundGrant(ctx, id, n)
 	}
@@ -135,14 +154,14 @@ func (s *Store) Fund(ctx context.Context, kind, id, value string) error {
 			return err
 		}
 		if status == "revoked" {
-			return errors.New("allocation is revoked")
+			return stateConflict("allocation is revoked")
 		}
 		var gs string
 		if err := tx.QueryRowContext(ctx, `SELECT status FROM grants WHERE id=?`, grant).Scan(&gs); err != nil {
 			return err
 		}
 		if gs == "closed" {
-			return errors.New("grant is closed")
+			return stateConflict("grant is closed")
 		}
 		available, err := Balance(ctx, tx, "grant_unallocated", grant)
 		if err != nil {
@@ -153,10 +172,10 @@ func (s *Store) Fund(ctx context.Context, kind, id, value string) error {
 			return err
 		}
 		if n.Sign() == 0 {
-			return errors.New("funding must be positive")
+			return invalidInput("funding must be positive")
 		}
 		if available.Cmp(n) < 0 {
-			return errors.New("insufficient unallocated grant balance")
+			return stateConflict("insufficient unallocated grant balance")
 		}
 		total, err := Amount(old)
 		if err != nil {
@@ -185,7 +204,7 @@ func (s *Store) fundGrant(ctx context.Context, id string, n *big.Int) error {
 			return err
 		}
 		if status == "closed" {
-			return errors.New("grant is closed")
+			return stateConflict("grant is closed")
 		}
 		total, err := Amount(old)
 		if err != nil {
@@ -204,20 +223,20 @@ func (s *Store) SetStatus(ctx context.Context, kind, id, status string) error {
 		switch kind {
 		case "grant":
 			if !oneOf(status, "draft", "active", "paused", "closed") {
-				return errors.New("invalid grant status")
+				return invalidInput("invalid grant status")
 			}
 			var old string
 			if err := tx.QueryRowContext(ctx, `SELECT status FROM grants WHERE id=?`, id).Scan(&old); err != nil {
 				return err
 			}
 			if old == "closed" && status != old {
-				return errors.New("closed grant cannot be reopened")
+				return stateConflict("closed grant cannot be reopened")
 			}
 			_, err := tx.ExecContext(ctx, `UPDATE grants SET status=? WHERE id=?`, status, id)
 			return err
 		case "allocation":
 			if !oneOf(status, "active", "paused", "exhausted", "revoked") {
-				return errors.New("invalid allocation status")
+				return invalidInput("invalid allocation status")
 			}
 			var old, grant, allocated string
 			if err := tx.QueryRowContext(ctx, `SELECT status,grant_id,allocated_wei FROM grant_allocations WHERE id=?`, id).Scan(&old, &grant, &allocated); err != nil {
@@ -227,14 +246,14 @@ func (s *Store) SetStatus(ctx context.Context, kind, id, status string) error {
 				if status == old {
 					return nil
 				}
-				return errors.New("revoked allocation cannot be reopened")
+				return stateConflict("revoked allocation cannot be reopened")
 			}
 			bal, err := Balance(ctx, tx, "allocation_available", id)
 			if err != nil {
 				return err
 			}
 			if status == "active" && bal.Sign() <= 0 {
-				return errors.New("allocation has no available balance")
+				return stateConflict("allocation has no available balance")
 			}
 			if status == "revoked" && bal.Sign() > 0 {
 				if err := Transfer(ctx, tx, "revoke:"+id, "return unused allocation", "allocation", id, "allocation_available", id, "grant_unallocated", grant, bal); err != nil {
@@ -284,7 +303,7 @@ func oneOf(s string, values ...string) bool {
 
 func (s *Store) CreateKey(ctx context.Context, allocation, name string) (string, string, error) {
 	if strings.TrimSpace(name) == "" {
-		return "", "", errors.New("name is required")
+		return "", "", invalidInput("name is required")
 	}
 	record, err := newKeyRecord(name)
 	if err != nil {
@@ -340,7 +359,7 @@ func insertKey(ctx context.Context, tx *sql.Tx, allocation string, record keyRec
 		return err
 	}
 	if status == "revoked" {
-		return errors.New("allocation is revoked")
+		return stateConflict("allocation is revoked")
 	}
 	_, err := tx.ExecContext(ctx, `INSERT INTO api_keys(id,allocation_id,name,prefix,secret_hash,created_at_ms) VALUES (?,?,?,?,?,?)`, record.id, allocation, record.name, record.prefix, record.hash[:], time.Now().UnixMilli())
 	return err
