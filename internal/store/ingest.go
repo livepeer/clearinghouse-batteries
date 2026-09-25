@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"math/big"
 	"strings"
 	"time"
 
@@ -29,6 +30,7 @@ type SignedTicketEvent struct {
 	Orchestrator    string      `json:"orch_address"`
 	PMSessionID     string      `json:"pm_session_id"`
 	ComputedFee     string      `json:"computed_fee"`
+	ComputedFeeUSD  *string     `json:"computed_fee_usd"`
 	Sequence        uint64      `json:"sequence_number"`
 	NumTickets      int         `json:"num_tickets"`
 	Started         int64       `json:"previous_time_unix"`
@@ -50,7 +52,7 @@ func (s *Store) Ingest(ctx context.Context, topic string, partition int, offset 
 	if offset < 0 || offset == math.MaxInt64 {
 		return errors.New("invalid Kafka offset")
 	}
-	var outcome, detail, overdraw string
+	var outcome, detail, overdraw, overdrawCurrency string
 	stream := KafkaStream(topic, partition)
 	err := s.Write(ctx, func(tx *sql.Tx) error {
 		var next int64
@@ -94,21 +96,34 @@ func (s *Store) Ingest(ctx context.Context, topic string, partition int, offset 
 				}
 			}
 		}
-		var allocation string
+		var allocation, currency string
+		var feeUSD any
+		var usdUnits *big.Int
 		if status == "applied" {
 			var state, app, orch string
-			err := tx.QueryRowContext(ctx, `SELECT allocation_id,state_id,app,orchestrator FROM payment_sessions WHERE id=?`, ev.AuthID).Scan(&allocation, &state, &app, &orch)
+			err := tx.QueryRowContext(ctx, `SELECT s.allocation_id,s.state_id,s.app,s.orchestrator,a.currency FROM payment_sessions s JOIN grant_allocations a ON a.id=s.allocation_id WHERE s.id=?`, ev.AuthID).Scan(&allocation, &state, &app, &orch, &currency)
 			if errors.Is(err, sql.ErrNoRows) {
 				status, reason = "quarantined", "missing auth_id or unknown payment session"
 			} else if err != nil {
 				return err
 			} else {
 				_, feeErr := Amount(ev.ComputedFee)
+				if ev.ComputedFeeUSD != nil {
+					rawUnits, err := units.DecimalToUnits(*ev.ComputedFeeUSD, "USD")
+					if err != nil {
+						feeErr = err
+					} else {
+						usdUnits, _ = Amount(rawUnits)
+						feeUSD, _ = units.UnitsToDecimal(rawUnits)
+					}
+				}
 				eventOrch, addrErr := Address(ev.Orchestrator)
 				if ev.SessionID != state || ev.App != app || eventOrch != orch || addrErr != nil {
 					status, reason = "quarantined", "event does not match session binding"
 				} else if feeErr != nil || ev.NumTickets < 1 || ev.NumTickets > 100 || ev.RequestID == "" || !validHash(ev.PMSessionID) || ev.Ended <= 0 || ev.Started < 0 {
 					status, reason = "quarantined", "invalid fee, ticket count, request, timestamp, or PM session"
+				} else if currency == "usd" && usdUnits == nil {
+					status, reason = "quarantined", "USD fee unavailable"
 				} else {
 					sessionID = ev.AuthID
 					ev.Orchestrator = eventOrch
@@ -116,26 +131,29 @@ func (s *Store) Ingest(ctx context.Context, topic string, partition int, offset 
 				}
 			}
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO usage_events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, uid, eventID, topic, partition, offset, raw, sessionID, ev.Pipeline, ev.RequestID, ev.Started, ev.Ended, string(ev.BillableSeconds), string(ev.Pixels), ev.ComputedFee, status, reason, now); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO usage_events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, uid, eventID, topic, partition, offset, raw, sessionID, ev.Pipeline, ev.RequestID, ev.Started, ev.Ended, string(ev.BillableSeconds), string(ev.Pixels), ev.ComputedFee, feeUSD, status, reason, now); err != nil {
 			return err
 		}
 		outcome, detail = status, reason
 		if status == "applied" {
 			aid := ID()
-			if _, err := tx.ExecContext(ctx, `INSERT INTO signing_authorizations VALUES (?,?,?,?,?,?,?,?,?,'signed',?)`, aid, uid, ev.AuthID, ev.RequestID, fmt.Sprint(ev.Sequence), ev.PMSessionID, ev.Orchestrator, ev.ComputedFee, ev.NumTickets, ev.Ended); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO signing_authorizations VALUES (?,?,?,?,?,?,?,?,?,?,'signed',?)`, aid, uid, ev.AuthID, ev.RequestID, fmt.Sprint(ev.Sequence), ev.PMSessionID, ev.Orchestrator, ev.ComputedFee, feeUSD, ev.NumTickets, ev.Ended); err != nil {
 				return err
 			}
 			n, _ := Amount(ev.ComputedFee)
-			if err := Transfer(ctx, tx, "usage:"+env.ID, "signed usage", "signing_authorization", aid, "allocation_available", allocation, "allocation_spent", allocation, n); err != nil {
+			if currency == "usd" {
+				n = usdUnits
+			}
+			if err := TransferCurrency(ctx, tx, "usage:"+env.ID, "signed usage", "signing_authorization", aid, "allocation_available", allocation, "allocation_spent", allocation, currency, n); err != nil {
 				return err
 			}
-			balance, err := Balance(ctx, tx, "allocation_available", allocation)
+			balance, err := BalanceCurrency(ctx, tx, "allocation_available", allocation, currency)
 			if err != nil {
 				return err
 			}
 			if balance.Sign() <= 0 {
 				if balance.Sign() < 0 {
-					overdraw = balance.String()
+					overdraw, overdrawCurrency = balance.String(), currency
 				}
 				if _, err := tx.ExecContext(ctx, `UPDATE grant_allocations SET status='exhausted' WHERE id=? AND status='active'`, allocation); err != nil {
 					return err
@@ -152,11 +170,11 @@ func (s *Store) Ingest(ctx context.Context, topic string, partition int, offset 
 			slog.Warn("usage quarantined", "topic", topic, "partition", partition, "offset", offset, "reason", detail)
 		}
 		if overdraw != "" {
-			available, conversionErr := units.WeiToETH(overdraw)
+			available, conversionErr := units.UnitsToDecimal(overdraw)
 			if conversionErr != nil {
 				slog.Error("allocation overdraw amount invalid", "topic", topic, "partition", partition, "offset", offset, "error", conversionErr)
 			} else {
-				slog.Warn("allocation overdraw recorded", "topic", topic, "partition", partition, "offset", offset, "available_eth", available)
+				slog.Warn("allocation overdraw recorded", "topic", topic, "partition", partition, "offset", offset, "available", available, "currency", overdrawCurrency)
 			}
 		}
 	}

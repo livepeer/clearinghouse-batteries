@@ -121,12 +121,12 @@ func readAuthorization(ctx context.Context, q querier, key, state string) (autho
 	err := q.QueryRowContext(ctx, `
 SELECT k.secret_hash,k.allocation_id,k.revoked_at_ms,k.last_used_at_ms,
  a.status,g.status,a.starts_at_ms,a.ends_at_ms,g.starts_at_ms,g.ends_at_ms,
- coalesce(b.balance_wei,'0'),coalesce(s.id,''),coalesce(s.api_key_id,''),
+ coalesce(b.balance_units,'0'),coalesce(s.id,''),coalesce(s.api_key_id,''),
  coalesce(s.app,''),coalesce(s.payment_type,''),coalesce(s.orchestrator,''),
  coalesce(s.status,''),coalesce(s.last_seen_at_ms,0)
 FROM api_keys k JOIN grant_allocations a ON a.id=k.allocation_id
  JOIN grants g ON g.id=a.grant_id
- LEFT JOIN account_balances b ON b.account_type='allocation_available' AND b.account_id=a.id
+ LEFT JOIN account_balances b ON b.account_type='allocation_available' AND b.account_id=a.id AND b.currency=a.currency
  LEFT JOIN payment_sessions s ON s.state_id=?
 WHERE k.id=?`, state, key).Scan(&a.saved, &a.allocation, &a.revoked, &a.lastUsed,
 		&a.allocationStatus, &a.grantStatus, &a.start, &a.end, &a.grantStart, &a.grantEnd,

@@ -61,7 +61,7 @@ func TestBalanceUpdateFailureRollsBackUsageAndFunding(t *testing.T) {
 	require.NoError(t, f.DB.DB.QueryRow(`SELECT count(*) FROM signing_authorizations`).Scan(&auths))
 	require.NoError(t, f.DB.DB.QueryRow(`SELECT count(*) FROM ingestion_checkpoints`).Scan(&checkpoints))
 	var total string
-	require.NoError(t, f.DB.DB.QueryRow(`SELECT total_wei FROM grants WHERE id=?`, f.Grant).Scan(&total))
+	require.NoError(t, f.DB.DB.QueryRow(`SELECT total_units FROM grants WHERE id=?`, f.Grant).Scan(&total))
 	after, err := f.DB.Report(ctx)
 	require.NoError(t, err)
 	if events != 0 || auths != 0 || checkpoints != 0 || total != "100" || !reflect.DeepEqual(before, after) {
@@ -216,7 +216,7 @@ func TestConcurrentSessionCreationRevalidates(t *testing.T) {
 func TestCachedBalanceCanonicalConstraint(t *testing.T) {
 	f := testutil.New(t, "100")
 	for _, value := range []string{"", "-", "-0", "+1", "01", "-01", "1.0", "1e3", " 1", "-1x"} {
-		if _, err := f.DB.DB.Exec(`UPDATE account_balances SET balance_wei=?`, value); err == nil {
+		if _, err := f.DB.DB.Exec(`UPDATE account_balances SET balance_units=?`, value); err == nil {
 			t.Fatalf("accepted noncanonical balance %q", value)
 		}
 	}

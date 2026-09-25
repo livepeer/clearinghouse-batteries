@@ -70,7 +70,7 @@ func managementHandler(ctx context.Context, db *store.Store) http.Handler {
 		path, kind := resource.path, resource.kind
 		mux.HandleFunc("POST /v1/"+path, func(w http.ResponseWriter, r *http.Request) {
 			managementResult(w, http.StatusCreated, func() (any, error) {
-				fields, err := managementFields(w, r, "name", "amount_eth", "sponsor", "beneficiary", "grant_id", "status", "metadata", "starts_at", "ends_at")
+				fields, err := managementFields(w, r, "name", "amount_usd", "amount_eth", "sponsor", "beneficiary", "grant_id", "status", "metadata", "starts_at", "ends_at")
 				if err != nil {
 					return nil, err
 				}
@@ -80,11 +80,7 @@ func managementHandler(ctx context.Context, db *store.Store) http.Handler {
 				if kind == "allocation" && (fields["sponsor"] != "" || fields["grant_id"] == "") {
 					return nil, badManagementRequest("allocations require grant_id and do not accept sponsor")
 				}
-				amount := fields["amount_eth"]
-				if amount == "" {
-					amount = "0"
-				}
-				amount, err = inputAmount(amount, kind == "allocation")
+				amount, currency, err := inputAmount(fields["amount_usd"], fields["amount_eth"], true, kind == "allocation")
 				if err != nil {
 					return nil, badManagementRequest(err.Error())
 				}
@@ -98,23 +94,23 @@ func managementHandler(ctx context.Context, db *store.Store) http.Handler {
 				}
 				id, err := db.Create(r.Context(), kind, store.Create{
 					Name: fields["name"], Sponsor: fields["sponsor"], Beneficiary: fields["beneficiary"], GrantID: fields["grant_id"],
-					Amount: amount, Status: fields["status"], Metadata: fields["metadata"], Starts: starts, Ends: ends,
+					Amount: amount, Currency: currency, Status: fields["status"], Metadata: fields["metadata"], Starts: starts, Ends: ends,
 				})
 				return map[string]string{"id": id}, err
 			})
 		})
 		mux.HandleFunc("POST /v1/"+path+"/{id}/fund", func(w http.ResponseWriter, r *http.Request) {
 			managementResult(w, http.StatusOK, func() (any, error) {
-				fields, err := managementFields(w, r, "amount_eth")
+				fields, err := managementFields(w, r, "amount_usd", "amount_eth")
 				if err != nil {
 					return nil, err
 				}
-				amount, err := inputAmount(fields["amount_eth"], kind == "allocation")
+				amount, currency, err := inputAmount(fields["amount_usd"], fields["amount_eth"], false, kind == "allocation")
 				if err != nil {
 					return nil, badManagementRequest(err.Error())
 				}
 				id := r.PathValue("id")
-				return map[string]string{"id": id}, db.Fund(r.Context(), kind, id, amount)
+				return map[string]string{"id": id}, db.FundCurrency(r.Context(), kind, id, amount, currency)
 			})
 		})
 		mux.HandleFunc("PATCH /v1/"+path+"/{id}/status", func(w http.ResponseWriter, r *http.Request) {
@@ -130,29 +126,27 @@ func managementHandler(ctx context.Context, db *store.Store) http.Handler {
 	}
 	mux.HandleFunc("POST /v1/api-keys", func(w http.ResponseWriter, r *http.Request) {
 		managementResult(w, http.StatusCreated, func() (any, error) {
-			fields, err := managementFields(w, r, "allocation_id", "grant_id", "name", "amount_eth")
+			fields, err := managementFields(w, r, "allocation_id", "grant_id", "name", "amount_usd", "amount_eth")
 			if err != nil {
 				return nil, err
 			}
-			allocation, grant, amount := fields["allocation_id"], fields["grant_id"], fields["amount_eth"]
+			allocation, grant := fields["allocation_id"], fields["grant_id"]
+			usd, eth := fields["amount_usd"], fields["amount_eth"]
 			if (allocation == "") == (grant == "") {
 				return nil, badManagementRequest("specify exactly one of allocation_id or grant_id")
 			}
 			if allocation != "" {
-				if amount != "" {
-					return nil, badManagementRequest("amount_eth is only valid with grant_id")
+				if usd != "" || eth != "" {
+					return nil, badManagementRequest("amount is only valid with grant_id")
 				}
 				id, key, err := db.CreateKey(r.Context(), allocation, fields["name"])
 				return map[string]string{"allocation_id": allocation, "id": id, "api_key": key}, err
 			}
-			if amount == "" {
-				return nil, badManagementRequest("amount_eth is required with grant_id")
-			}
-			amount, err = inputAmount(amount, true)
+			amount, currency, err := inputAmount(usd, eth, false, true)
 			if err != nil {
 				return nil, badManagementRequest(err.Error())
 			}
-			allocation, id, key, err := db.CreateKeyForGrant(r.Context(), grant, fields["name"], amount)
+			allocation, id, key, err := db.CreateKeyForGrantCurrency(r.Context(), grant, fields["name"], amount, currency)
 			return map[string]string{"allocation_id": allocation, "id": id, "api_key": key}, err
 		})
 	})

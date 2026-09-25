@@ -28,13 +28,18 @@ type Fixture struct {
 
 func New(t *testing.T, amount string) *Fixture {
 	t.Helper()
+	return NewCurrency(t, amount, "eth")
+}
+
+func NewCurrency(t *testing.T, amount, currency string) *Fixture {
+	t.Helper()
 	ctx := context.Background()
 	f := &Fixture{Path: filepath.Join(t.TempDir(), "accounting.db")}
 	var err error
 	f.DB, err = store.Open(ctx, f.Path, true)
 	require.NoError(t, err)
 	t.Cleanup(func() { f.DB.Close() })
-	f.Grant, err = f.DB.Create(ctx, "grant", store.Create{Name: "test", Amount: amount, Status: "active"})
+	f.Grant, err = f.DB.Create(ctx, "grant", store.Create{Name: "test", Amount: amount, Currency: currency, Status: "active"})
 	require.NoError(t, err)
 	f.Allocation, err = f.DB.Create(ctx, "allocation", store.Create{Name: "test allocation", GrantID: f.Grant, Amount: amount})
 	require.NoError(t, err)
@@ -55,14 +60,14 @@ func New(t *testing.T, amount string) *Fixture {
 // Fixture cleanup runs this across management, usage, settlement and reorg tests.
 func AssertBalances(t *testing.T, db *store.Store) {
 	t.Helper()
-	rows, err := db.DB.Query(`SELECT account_type,account_id,direction,amount_wei FROM ledger_entries`)
+	rows, err := db.DB.Query(`SELECT account_type,account_id,currency,direction,amount_units FROM ledger_entries`)
 	require.NoError(t, err)
-	type account struct{ kind, id string }
+	type account struct{ kind, id, currency string }
 	want := map[account]*big.Int{}
 	for rows.Next() {
 		var a account
 		var direction, value string
-		require.NoError(t, rows.Scan(&a.kind, &a.id, &direction, &value))
+		require.NoError(t, rows.Scan(&a.kind, &a.id, &a.currency, &direction, &value))
 		n, ok := new(big.Int).SetString(value, 10)
 		if !ok {
 			t.Fatalf("invalid ledger amount %q", value)
@@ -81,13 +86,13 @@ func AssertBalances(t *testing.T, db *store.Store) {
 	}
 	require.NoError(t, rows.Err())
 	require.NoError(t, rows.Close())
-	rows, err = db.DB.Query(`SELECT account_type,account_id,balance_wei FROM account_balances`)
+	rows, err = db.DB.Query(`SELECT account_type,account_id,currency,balance_units FROM account_balances`)
 	require.NoError(t, err)
 	defer rows.Close()
 	for rows.Next() {
 		var a account
 		var value string
-		require.NoError(t, rows.Scan(&a.kind, &a.id, &value))
+		require.NoError(t, rows.Scan(&a.kind, &a.id, &a.currency, &value))
 		if want[a] == nil || want[a].String() != value {
 			t.Errorf("balance %v: cached %s, ledger %v", a, value, want[a])
 		}

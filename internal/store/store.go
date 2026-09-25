@@ -1,4 +1,4 @@
-// Package store owns the clearinghouse's SQLite transactions and exact wei arithmetic.
+// Package store owns the clearinghouse's SQLite transactions and exact currency arithmetic.
 package store
 
 import (
@@ -85,14 +85,14 @@ func ID() string {
 	return base64.RawURLEncoding.EncodeToString(id[:])
 }
 
-// Amount accepts canonical unsigned decimal integers without a floating-point conversion.
+// Amount accepts canonical unsigned integer units without a floating-point conversion.
 func Amount(value string) (*big.Int, error) {
 	if value == "" || len(value) > 256 || (len(value) > 1 && value[0] == '0') {
 		return nil, errors.New("amount must be a canonical unsigned decimal integer (at most 256 digits)")
 	}
 	for _, c := range value {
 		if c < '0' || c > '9' {
-			return nil, errors.New("amount must be an unsigned integer in wei")
+			return nil, errors.New("amount must be an unsigned integer")
 		}
 	}
 	n, ok := new(big.Int).SetString(value, 10)
@@ -107,8 +107,15 @@ type querier interface {
 }
 
 func Balance(ctx context.Context, q querier, account, owner string) (*big.Int, error) {
+	return BalanceCurrency(ctx, q, account, owner, "eth")
+}
+
+func BalanceCurrency(ctx context.Context, q querier, account, owner, currency string) (*big.Int, error) {
+	if currency != "usd" && currency != "eth" {
+		return nil, errors.New("invalid balance currency")
+	}
 	var value string
-	err := q.QueryRowContext(ctx, `SELECT balance_wei FROM account_balances WHERE account_type=? AND account_id=?`, account, owner).Scan(&value)
+	err := q.QueryRowContext(ctx, `SELECT balance_units FROM account_balances WHERE account_type=? AND account_id=? AND currency=?`, account, owner, currency).Scan(&value)
 	if errors.Is(err, sql.ErrNoRows) {
 		return new(big.Int), nil
 	}
@@ -128,6 +135,13 @@ func signedBalance(value string) (*big.Int, error) {
 
 // Transfer is the only posting primitive: two equal, opposite entries, committed with their source record.
 func Transfer(ctx context.Context, tx *sql.Tx, key, reason, refType, refID, debit, debitID, credit, creditID string, n *big.Int) error {
+	return TransferCurrency(ctx, tx, key, reason, refType, refID, debit, debitID, credit, creditID, "eth", n)
+}
+
+func TransferCurrency(ctx context.Context, tx *sql.Tx, key, reason, refType, refID, debit, debitID, credit, creditID, currency string, n *big.Int) error {
+	if currency != "usd" && currency != "eth" {
+		return errors.New("invalid transfer currency")
+	}
 	if n.Sign() < 0 {
 		return errors.New("negative transfer")
 	}
@@ -139,10 +153,10 @@ func Transfer(ctx context.Context, tx *sql.Tx, key, reason, refType, refID, debi
 		return err
 	}
 	for _, e := range []struct{ account, owner, dir string }{{debit, debitID, "debit"}, {credit, creditID, "credit"}} {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO ledger_entries VALUES (?,?,?,?,?,?,'wei',?)`, ID(), id, e.account, e.owner, e.dir, n.String(), now); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO ledger_entries VALUES (?,?,?,?,?,?,?,?)`, ID(), id, e.account, e.owner, e.dir, n.String(), currency, now); err != nil {
 			return err
 		}
-		balance, err := Balance(ctx, tx, e.account, e.owner)
+		balance, err := BalanceCurrency(ctx, tx, e.account, e.owner, currency)
 		if err != nil {
 			return err
 		}
@@ -151,7 +165,7 @@ func Transfer(ctx context.Context, tx *sql.Tx, key, reason, refType, refID, debi
 		} else {
 			balance.Add(balance, n)
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO account_balances VALUES (?,?,?) ON CONFLICT(account_type,account_id) DO UPDATE SET balance_wei=excluded.balance_wei`, e.account, e.owner, balance.String()); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO account_balances VALUES (?,?,?,?) ON CONFLICT(account_type,account_id,currency) DO UPDATE SET balance_units=excluded.balance_units`, e.account, e.owner, currency, balance.String()); err != nil {
 			return err
 		}
 	}
@@ -192,21 +206,21 @@ func (s *Store) Rows(ctx context.Context, query string, args ...any) ([]map[stri
 }
 
 func (s *Store) Report(ctx context.Context) ([]map[string]string, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT account_type,account_id,balance_wei FROM account_balances ORDER BY account_type,account_id`)
+	rows, err := s.DB.QueryContext(ctx, `SELECT account_type,account_id,currency,balance_units FROM account_balances ORDER BY account_type,account_id,currency`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := []map[string]string{}
 	for rows.Next() {
-		var a, id, v string
-		if err := rows.Scan(&a, &id, &v); err != nil {
+		var a, id, currency, v string
+		if err := rows.Scan(&a, &id, &currency, &v); err != nil {
 			return nil, err
 		}
 		if _, err := signedBalance(v); err != nil {
 			return nil, err
 		}
-		out = append(out, map[string]string{"account_type": a, "account_id": id, "balance_wei": v})
+		out = append(out, map[string]string{"account_type": a, "account_id": id, "currency": currency, "balance_units": v})
 	}
 	return out, rows.Err()
 }

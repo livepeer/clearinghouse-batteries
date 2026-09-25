@@ -31,12 +31,14 @@ type StatusParams struct {
 }
 type FundParams struct {
 	IDParams
-	AmountETH string `descr:"Additional ETH (exact decimal; allocations also accept 'all')"`
+	AmountUSD string `optional:"true" descr:"Additional USD (exact decimal; allocations also accept 'all')"`
+	AmountETH string `optional:"true" descr:"Additional ETH (exact decimal; allocations also accept 'all')"`
 }
 type CreateParams struct {
 	Common
 	Name        string `descr:"Grant or allocation name"`
-	AmountETH   string `default:"0" descr:"Initial ETH funding (allocations also accept 'all')"`
+	AmountUSD   string `optional:"true" descr:"Initial USD funding (allocations also accept 'all')"`
+	AmountETH   string `optional:"true" descr:"Initial ETH funding (allocations also accept 'all')"`
 	Sponsor     string `optional:"true" descr:"Grant sponsor label"`
 	Beneficiary string `optional:"true" descr:"Allocation beneficiary label"`
 	GrantID     string `optional:"true" descr:"Parent grant ID (required for allocations)"`
@@ -50,6 +52,7 @@ type KeyParams struct {
 	AllocationID string `optional:"true" descr:"Existing allocation ID"`
 	GrantID      string `optional:"true" descr:"Grant ID for a new allocation"`
 	Name         string `descr:"API key name (also names new allocations)"`
+	AmountUSD    string `optional:"true" descr:"Funding in USD; 'all' uses the grant's unallocated balance"`
 	AmountETH    string `optional:"true" descr:"Funding in ETH; 'all' uses the grant's unallocated balance"`
 }
 
@@ -103,12 +106,12 @@ func Root(out, errOut io.Writer) *cobra.Command {
 			if kind == "allocation" && p.GrantID == "" {
 				return errors.New("--grant-id required")
 			}
-			amount, err := inputAmount(p.AmountETH, kind == "allocation")
+			amount, currency, err := inputAmount(p.AmountUSD, p.AmountETH, true, kind == "allocation")
 			if err != nil {
 				return err
 			}
 			return withDB(c, p.Common, false, func(db *store.Store) (any, error) {
-				id, err := db.Create(c.Context(), kind, store.Create{Name: p.Name, Sponsor: p.Sponsor, Beneficiary: p.Beneficiary, GrantID: p.GrantID, Amount: amount, Status: p.Status, Metadata: p.Metadata, Starts: starts, Ends: ends})
+				id, err := db.Create(c.Context(), kind, store.Create{Name: p.Name, Sponsor: p.Sponsor, Beneficiary: p.Beneficiary, GrantID: p.GrantID, Amount: amount, Currency: currency, Status: p.Status, Metadata: p.Metadata, Starts: starts, Ends: ends})
 				return map[string]string{"id": id}, err
 			})
 		}, statusValues(initial)))
@@ -118,13 +121,13 @@ func Root(out, errOut io.Writer) *cobra.Command {
 				return map[string]string{"id": p.ID, "status": p.Status}, db.SetStatus(c.Context(), kind, p.ID, p.Status)
 			})
 		}, statusValues(statuses)))
-		group.AddCommand(command[FundParams]("fund", "Add funding in ETH", func(p *FundParams, c *cobra.Command) error {
-			amount, err := inputAmount(p.AmountETH, kind == "allocation")
+		group.AddCommand(command[FundParams]("fund", "Add funding", func(p *FundParams, c *cobra.Command) error {
+			amount, currency, err := inputAmount(p.AmountUSD, p.AmountETH, false, kind == "allocation")
 			if err != nil {
 				return err
 			}
 			return withDB(c, p.Common, false, func(db *store.Store) (any, error) {
-				return map[string]string{"id": p.ID}, db.Fund(c.Context(), kind, p.ID, amount)
+				return map[string]string{"id": p.ID}, db.FundCurrency(c.Context(), kind, p.ID, amount, currency)
 			})
 		}))
 		if kind == "allocation" {
@@ -137,29 +140,29 @@ func Root(out, errOut io.Writer) *cobra.Command {
 		if (p.AllocationID == "") == (p.GrantID == "") {
 			return errors.New("specify exactly one of --allocation-id or --grant-id")
 		}
-		if p.AllocationID != "" && p.AmountETH != "" {
-			return errors.New("--amount-eth is only valid with --grant-id")
+		if p.AllocationID != "" && (p.AmountETH != "" || p.AmountUSD != "") {
+			return errors.New("amount is only valid with --grant-id")
 		}
-		if p.GrantID != "" && p.AmountETH == "" {
-			return errors.New("--amount-eth required with --grant-id")
+		if p.GrantID != "" && p.AmountETH == "" && p.AmountUSD == "" {
+			return errors.New("--amount-usd or --amount-eth required with --grant-id")
 		}
 		return withDB(c, p.Common, false, func(db *store.Store) (any, error) {
 			if p.AllocationID != "" {
 				id, key, err := db.CreateKey(c.Context(), p.AllocationID, p.Name)
 				return map[string]string{"allocation_id": p.AllocationID, "id": id, "api_key": key}, err
 			}
-			amount, err := inputAmount(p.AmountETH, true)
+			amount, currency, err := inputAmount(p.AmountUSD, p.AmountETH, false, true)
 			if err != nil {
 				return nil, err
 			}
-			allocation, id, key, err := db.CreateKeyForGrant(c.Context(), p.GrantID, p.Name, amount)
+			allocation, id, key, err := db.CreateKeyForGrantCurrency(c.Context(), p.GrantID, p.Name, amount, currency)
 			return map[string]string{"allocation_id": allocation, "id": id, "api_key": key}, err
 		})
 	})
 	createKey.Long = `Create a key; the secret is shown once.
 
 Specify exactly one of --allocation-id and --grant-id.
---amount-eth is required with --grant-id and cannot be used with --allocation-id.`
+Exactly one of --amount-usd or --amount-eth is required with --grant-id and cannot be used with --allocation-id.`
 	keys.AddCommand(createKey)
 	keys.AddCommand(listCommand("api-key"))
 	addRevoke(keys, "api-key")
@@ -183,7 +186,7 @@ Specify exactly one of --allocation-id and --grant-id.
 	usage.AddCommand(listCommand("usage"))
 	root.AddCommand(usage)
 	ledger := &cobra.Command{Use: "ledger", Short: "Inspect exact balances"}
-	ledger.AddCommand(command[ListParams]("report", "Report credit-minus-debit ETH balances", func(p *ListParams, c *cobra.Command) error {
+	ledger.AddCommand(command[ListParams]("report", "Report credit-minus-debit balances", func(p *ListParams, c *cobra.Command) error {
 		return withDB(c, p.Common, false, func(db *store.Store) (any, error) { return db.Report(c.Context()) })
 	}))
 	root.AddCommand(ledger)
@@ -246,14 +249,28 @@ func withDB(c *cobra.Command, p Common, mutate bool, fn func(*store.Store) (any,
 	return enc.Encode(result)
 }
 
-func inputAmount(value string, allowAll bool) (string, error) {
+func inputAmount(usd, eth string, defaultZero, allowAll bool) (string, string, error) {
+	if usd != "" && eth != "" {
+		return "", "", errors.New("specify exactly one of amount_usd or amount_eth")
+	}
+	if usd == "" && eth == "" {
+		if !defaultZero {
+			return "", "", errors.New("amount_usd or amount_eth is required")
+		}
+		return "0", "", nil
+	}
+	value, currency := usd, "usd"
+	if eth != "" {
+		value, currency = eth, "eth"
+	}
 	if value == "all" {
 		if allowAll {
-			return value, nil
+			return value, currency, nil
 		}
-		return "", errors.New("'all' is only valid for allocation funding")
+		return "", "", errors.New("'all' is only valid for allocation funding")
 	}
-	return units.ETHToWei(value)
+	amount, err := units.DecimalToUnits(value, strings.ToUpper(currency))
+	return amount, currency, err
 }
 func parseTime(s string) (*int64, error) {
 	if s == "" {

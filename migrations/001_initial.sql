@@ -1,7 +1,8 @@
 -- UP
 CREATE TABLE grants (
  id TEXT PRIMARY KEY, name TEXT NOT NULL, sponsor TEXT NOT NULL DEFAULT '',
- total_wei TEXT NOT NULL CHECK(total_wei <> '' AND total_wei NOT GLOB '*[^0-9]*' AND (total_wei='0' OR substr(total_wei,1,1)<>'0')),
+ total_units TEXT NOT NULL CHECK(total_units <> '' AND total_units NOT GLOB '*[^0-9]*' AND (total_units='0' OR substr(total_units,1,1)<>'0')),
+ currency TEXT NOT NULL DEFAULT 'usd' CHECK(currency IN ('usd','eth')),
  starts_at_ms INTEGER, ends_at_ms INTEGER,
  status TEXT NOT NULL CHECK(status IN ('draft','active','paused','closed')),
  metadata TEXT NOT NULL DEFAULT '', created_at_ms INTEGER NOT NULL,
@@ -9,13 +10,21 @@ CREATE TABLE grants (
 ) STRICT;
 CREATE TABLE grant_allocations (
  id TEXT PRIMARY KEY, grant_id TEXT NOT NULL REFERENCES grants(id), name TEXT NOT NULL, beneficiary TEXT NOT NULL DEFAULT '',
- allocated_wei TEXT NOT NULL CHECK(allocated_wei <> '' AND allocated_wei NOT GLOB '*[^0-9]*' AND (allocated_wei='0' OR substr(allocated_wei,1,1)<>'0')),
+ allocated_units TEXT NOT NULL CHECK(allocated_units <> '' AND allocated_units NOT GLOB '*[^0-9]*' AND (allocated_units='0' OR substr(allocated_units,1,1)<>'0')),
+ currency TEXT NOT NULL CHECK(currency IN ('usd','eth')),
  starts_at_ms INTEGER, ends_at_ms INTEGER,
  status TEXT NOT NULL CHECK(status IN ('active','paused','exhausted','revoked')),
  metadata TEXT NOT NULL DEFAULT '', created_at_ms INTEGER NOT NULL,
  CHECK(starts_at_ms IS NULL OR ends_at_ms IS NULL OR ends_at_ms > starts_at_ms)
 ) STRICT;
 CREATE INDEX allocations_grant ON grant_allocations(grant_id);
+CREATE TRIGGER grants_currency_immutable BEFORE UPDATE OF currency ON grants
+ WHEN NEW.currency<>OLD.currency BEGIN SELECT RAISE(ABORT,'grant currency is immutable'); END;
+CREATE TRIGGER allocations_currency_immutable BEFORE UPDATE OF currency ON grant_allocations
+ WHEN NEW.currency<>OLD.currency BEGIN SELECT RAISE(ABORT,'allocation currency is immutable'); END;
+CREATE TRIGGER allocations_currency_matches_grant BEFORE INSERT ON grant_allocations
+ WHEN NEW.currency<>(SELECT currency FROM grants WHERE id=NEW.grant_id)
+ BEGIN SELECT RAISE(ABORT,'allocation currency must match grant'); END;
 CREATE TABLE api_keys (
  id TEXT PRIMARY KEY, allocation_id TEXT NOT NULL REFERENCES grant_allocations(id), name TEXT NOT NULL,
  prefix TEXT NOT NULL, secret_hash BLOB NOT NULL UNIQUE CHECK(length(secret_hash)=32),
@@ -34,7 +43,7 @@ CREATE INDEX sessions_allocation ON payment_sessions(allocation_id);
 CREATE TABLE usage_events (
  id TEXT PRIMARY KEY, event_id TEXT UNIQUE, topic TEXT NOT NULL, partition INTEGER NOT NULL CHECK(partition>=0 AND partition<=2147483647), offset INTEGER NOT NULL CHECK(offset>=0),
  raw_payload BLOB NOT NULL, payment_session_id TEXT REFERENCES payment_sessions(id),
- pipeline TEXT, request_id TEXT, started_at_ms INTEGER, ended_at_ms INTEGER, billable_seconds TEXT, pixels TEXT, computed_fee_wei TEXT,
+ pipeline TEXT, request_id TEXT, started_at_ms INTEGER, ended_at_ms INTEGER, billable_seconds TEXT, pixels TEXT, computed_fee_wei TEXT, computed_fee_usd TEXT,
  status TEXT NOT NULL CHECK(status IN ('applied','quarantined','ignored','duplicate')), error TEXT NOT NULL DEFAULT '', created_at_ms INTEGER NOT NULL,
  UNIQUE(topic, partition, offset)
 ) STRICT;
@@ -45,6 +54,7 @@ CREATE TABLE signing_authorizations (
  pm_session_id TEXT NOT NULL CHECK(length(pm_session_id)=66 AND substr(pm_session_id,1,2)='0x' AND substr(pm_session_id,3) NOT GLOB '*[^0-9a-f]*'),
  orchestrator TEXT NOT NULL CHECK(length(orchestrator)=42 AND substr(orchestrator,1,2)='0x' AND substr(orchestrator,3) NOT GLOB '*[^0-9a-f]*'),
  computed_fee_wei TEXT NOT NULL CHECK(computed_fee_wei<>'' AND computed_fee_wei NOT GLOB '*[^0-9]*' AND (computed_fee_wei='0' OR substr(computed_fee_wei,1,1)<>'0')),
+ computed_fee_usd TEXT,
  num_tickets INTEGER NOT NULL CHECK(num_tickets>0 AND num_tickets<=100),
  status TEXT NOT NULL DEFAULT 'signed' CHECK(status='signed'), signed_at_ms INTEGER NOT NULL
 ) STRICT;
@@ -57,20 +67,21 @@ CREATE TABLE ledger_entries (
  id TEXT PRIMARY KEY, transaction_id TEXT NOT NULL REFERENCES ledger_transactions(id),
  account_type TEXT NOT NULL CHECK(account_type IN ('grant_funding_source','grant_unallocated','allocation_available','allocation_spent','treasury_cash','treasury_settled_spend','escrow_deposit','escrow_reserve')),
  account_id TEXT NOT NULL, direction TEXT NOT NULL CHECK(direction IN ('debit','credit')),
- amount_wei TEXT NOT NULL CHECK(amount_wei<>'' AND amount_wei NOT GLOB '*[^0-9]*' AND substr(amount_wei,1,1) BETWEEN '1' AND '9'),
- currency TEXT NOT NULL DEFAULT 'wei' CHECK(currency='wei'), created_at_ms INTEGER NOT NULL
+ amount_units TEXT NOT NULL CHECK(amount_units<>'' AND amount_units NOT GLOB '*[^0-9]*' AND substr(amount_units,1,1) BETWEEN '1' AND '9'),
+ currency TEXT NOT NULL CHECK(currency IN ('usd','eth')), created_at_ms INTEGER NOT NULL
 ) STRICT;
 CREATE INDEX ledger_account ON ledger_entries(account_type,account_id);
 CREATE INDEX ledger_transaction ON ledger_entries(transaction_id);
 CREATE TABLE account_balances (
  account_type TEXT NOT NULL CHECK(account_type IN ('grant_funding_source','grant_unallocated','allocation_available','allocation_spent','treasury_cash','treasury_settled_spend','escrow_deposit','escrow_reserve')),
  account_id TEXT NOT NULL,
- balance_wei TEXT NOT NULL CHECK(
-  balance_wei='0' OR
-  (substr(balance_wei,1,1) BETWEEN '1' AND '9' AND balance_wei NOT GLOB '*[^0-9]*') OR
-  (substr(balance_wei,1,1)='-' AND substr(balance_wei,2,1) BETWEEN '1' AND '9' AND substr(balance_wei,2) NOT GLOB '*[^0-9]*')
+ currency TEXT NOT NULL CHECK(currency IN ('usd','eth')),
+ balance_units TEXT NOT NULL CHECK(
+  balance_units='0' OR
+  (substr(balance_units,1,1) BETWEEN '1' AND '9' AND balance_units NOT GLOB '*[^0-9]*') OR
+  (substr(balance_units,1,1)='-' AND substr(balance_units,2,1) BETWEEN '1' AND '9' AND substr(balance_units,2) NOT GLOB '*[^0-9]*')
  ),
- PRIMARY KEY(account_type,account_id)
+ PRIMARY KEY(account_type,account_id,currency)
 ) STRICT;
 CREATE TRIGGER ledger_entries_no_update BEFORE UPDATE ON ledger_entries BEGIN SELECT RAISE(ABORT,'ledger is append-only'); END;
 CREATE TRIGGER ledger_entries_no_delete BEFORE DELETE ON ledger_entries BEGIN SELECT RAISE(ABORT,'ledger is append-only'); END;
@@ -159,4 +170,5 @@ DROP TABLE usage_events;
 DROP TABLE payment_sessions;
 DROP TABLE api_keys;
 DROP TABLE grant_allocations;
+DROP TRIGGER grants_currency_immutable;
 DROP TABLE grants;

@@ -233,10 +233,15 @@ environment variables, and defaults.
 
 ### Amounts and allocation states
 
-CLI amounts are exact decimal ETH values with up to 18 fractional digits. Signs,
-exponents, and additional precision are rejected. ETH-denominated JSON fields use
-`*_eth` names and decimal values. Only allocations accept
-`--amount-eth all`; grant creation and funding do not.
+Grant and allocation amounts use explicit `--amount-usd` or `--amount-eth`
+flags (or `amount_usd` / `amount_eth` API fields). Values are exact decimals
+with up to 18 fractional digits. New grants default to USD $0 if neither amount
+is provided. Allocations inherit their grant's currency and funding must use
+that currency. Allocation creation and funding accept `all` in the amount field.
+JSON output includes `currency` and decimal `*_usd` or `*_eth` amount fields.
+
+If USD or ETH is missing from the signer usage event, then the event is
+quarantined. On-chain escrow and settlement remain denominated in ETH.
 
 Grant creation defaults to `draft`. Allocation creation defaults to `active`, or
 `exhausted` when it receives zero funding. Funding an exhausted allocation
@@ -318,20 +323,20 @@ Management routes are versioned under `/v1`:
 | Health | `GET /livez`, `GET /readyz` |
 
 Input bodies accept `multipart/form-data`, `application/x-www-form-urlencoded`,
-and JSON. Field names are snake_case. Amounts use exact decimal
-ETH strings in `amount_eth`; allocation funding also accepts `all`. For example:
+and JSON. Field names are snake_case. Amounts use exact decimal strings in
+`amount_usd` or `amount_eth`; allocation funding also accepts `all`. For example:
 
 ```sh
-curl -F name='Developer grants' -F amount_eth=1 -F status=active \
+curl -F name='Developer grants' -F amount_usd=100 -F status=active \
   http://127.0.0.1:8081/v1/grants
 
 curl -H 'Content-Type: application/json' \
-  -d '{"grant_id":"GRANT_ID","name":"gateway","amount_eth":"0.1"}' \
+  -d '{"grant_id":"GRANT_ID","name":"gateway","amount_usd":"25"}' \
   http://127.0.0.1:8081/v1/api-keys
 ```
 
 The API returns the same resource field names and types as the CLI JSON,
-including `*_eth` strings, millisecond timestamps, and string-valued
+including `*_usd` and `*_eth` strings, millisecond timestamps, and string-valued
 `metadata`. An item route returns one object. API key creation returns the
 secret once; subsequent lists omit it. Lists have no filtering or pagination.
 Migrations remain CLI-only. Error responses contain an `error` string and use

@@ -62,19 +62,19 @@ func TestAuthorizeAcceptsUnderscoreInBase64URLKeyID(t *testing.T) {
 func TestMigrationsConstraintsAndRoundTrip(t *testing.T) {
 	f := testutil.New(t, "100")
 	ctx := context.Background()
-	for _, q := range []string{`UPDATE ledger_entries SET amount_wei='1'`, `DELETE FROM ledger_entries`, `DELETE FROM ledger_transactions`, `UPDATE ledger_transactions SET reason='changed'`, `INSERT INTO api_keys(id,allocation_id,name,prefix,secret_hash,created_at_ms) VALUES ('bad','missing','bad','bad',zeroblob(32),0)`} {
+	for _, q := range []string{`UPDATE ledger_entries SET amount_units='1'`, `DELETE FROM ledger_entries`, `DELETE FROM ledger_transactions`, `UPDATE ledger_transactions SET reason='changed'`, `INSERT INTO api_keys(id,allocation_id,name,prefix,secret_hash,created_at_ms) VALUES ('bad','missing','bad','bad',zeroblob(32),0)`} {
 		if _, err := f.DB.DB.ExecContext(ctx, q); err == nil {
 			t.Fatalf("constraint allowed %s", q)
 		}
 	}
-	for _, q := range []string{`UPDATE grants SET total_wei='01'`, `UPDATE grant_allocations SET status='unknown'`, `UPDATE payment_sessions SET orchestrator='0xgggggggggggggggggggggggggggggggggggggggg'`, `UPDATE api_keys SET secret_hash=zeroblob(31)`} {
+	for _, q := range []string{`UPDATE grants SET total_units='01'`, `UPDATE grants SET currency='usd'`, `UPDATE grant_allocations SET status='unknown'`, `UPDATE grant_allocations SET currency='usd'`, `UPDATE payment_sessions SET orchestrator='0xgggggggggggggggggggggggggggggggggggggggg'`, `UPDATE api_keys SET secret_hash=zeroblob(31)`} {
 		if _, err := f.DB.DB.ExecContext(ctx, q); err == nil {
 			t.Fatalf("check allowed %s", q)
 		}
 	}
 	for _, q := range []string{
-		`INSERT INTO grants(id,name,total_wei,status,created_at_ms) VALUES ('defaults-grant','defaults','0','draft',0) RETURNING metadata`,
-		`INSERT INTO grant_allocations(id,grant_id,name,allocated_wei,status,created_at_ms) VALUES ('defaults-allocation','defaults-grant','defaults','0','exhausted',0) RETURNING metadata`,
+		`INSERT INTO grants(id,name,total_units,status,created_at_ms) VALUES ('defaults-grant','defaults','0','draft',0) RETURNING metadata`,
+		`INSERT INTO grant_allocations(id,grant_id,name,allocated_units,currency,status,created_at_ms) VALUES ('defaults-allocation','defaults-grant','defaults','0','usd','exhausted',0) RETURNING metadata`,
 	} {
 		var metadata string
 		require.NoError(t, f.DB.DB.QueryRowContext(ctx, q).Scan(&metadata), q)
@@ -253,7 +253,7 @@ func TestAllAllocationCreationAndFunding(t *testing.T) {
 	zeroAllocation, err := f.DB.Create(ctx, "allocation", store.Create{Name: "empty allocation", GrantID: zeroGrant, Amount: "all"})
 	require.NoError(t, err)
 	var allocated, status string
-	require.NoError(t, f.DB.DB.QueryRow(`SELECT allocated_wei,status FROM grant_allocations WHERE id=?`, zeroAllocation).Scan(&allocated, &status))
+	require.NoError(t, f.DB.DB.QueryRow(`SELECT allocated_units,status FROM grant_allocations WHERE id=?`, zeroAllocation).Scan(&allocated, &status))
 	if allocated != "0" || status != "exhausted" {
 		t.Fatal(allocated, status)
 	}
@@ -261,7 +261,7 @@ func TestAllAllocationCreationAndFunding(t *testing.T) {
 	require.NoError(t, f.DB.Fund(ctx, "grant", f.Grant, "75"))
 	allocation, err := f.DB.Create(ctx, "allocation", store.Create{Name: "everything", GrantID: f.Grant, Amount: "all"})
 	require.NoError(t, err)
-	require.NoError(t, f.DB.DB.QueryRow(`SELECT allocated_wei,status FROM grant_allocations WHERE id=?`, allocation).Scan(&allocated, &status))
+	require.NoError(t, f.DB.DB.QueryRow(`SELECT allocated_units,status FROM grant_allocations WHERE id=?`, allocation).Scan(&allocated, &status))
 	if allocated != "75" || status != "active" {
 		t.Fatal(allocated, status)
 	}
@@ -270,7 +270,7 @@ func TestAllAllocationCreationAndFunding(t *testing.T) {
 	}
 	require.NoError(t, f.DB.Fund(ctx, "grant", f.Grant, "25"))
 	require.NoError(t, f.DB.Fund(ctx, "allocation", allocation, "all"))
-	require.NoError(t, f.DB.DB.QueryRow(`SELECT allocated_wei FROM grant_allocations WHERE id=?`, allocation).Scan(&allocated))
+	require.NoError(t, f.DB.DB.QueryRow(`SELECT allocated_units FROM grant_allocations WHERE id=?`, allocation).Scan(&allocated))
 	if allocated != "100" {
 		t.Fatal(allocated)
 	}
@@ -298,11 +298,11 @@ func TestConcurrentAllUsesOneTransactionalBalance(t *testing.T) {
 	for err := range errs {
 		require.NoError(t, err)
 	}
-	rows, err := f.DB.Rows(ctx, `SELECT allocated_wei,status FROM grant_allocations WHERE name LIKE 'all-%'`)
+	rows, err := f.DB.Rows(ctx, `SELECT allocated_units,status FROM grant_allocations WHERE name LIKE 'all-%'`)
 	require.NoError(t, err)
 	var funded int
 	for _, row := range rows {
-		switch row["allocated_wei"] {
+		switch row["allocated_units"] {
 		case "100":
 			funded++
 			if row["status"] != "active" {
@@ -380,7 +380,7 @@ func TestCreateKeyForGrantIsAtomicAndUsesAllocationDefaults(t *testing.T) {
 	}
 	var name, beneficiary, amount, metadata, allocationStatus string
 	var starts, ends any
-	require.NoError(t, f.DB.DB.QueryRow(`SELECT name,beneficiary,allocated_wei,metadata,starts_at_ms,ends_at_ms,status FROM grant_allocations WHERE id=?`, allocation).Scan(&name, &beneficiary, &amount, &metadata, &starts, &ends, &allocationStatus))
+	require.NoError(t, f.DB.DB.QueryRow(`SELECT name,beneficiary,allocated_units,metadata,starts_at_ms,ends_at_ms,status FROM grant_allocations WHERE id=?`, allocation).Scan(&name, &beneficiary, &amount, &metadata, &starts, &ends, &allocationStatus))
 	if name != "gateway" || beneficiary != "" || amount != "50" || metadata != "" || starts != nil || ends != nil || allocationStatus != "active" {
 		t.Fatal(name, beneficiary, amount, metadata, starts, ends, allocationStatus)
 	}
@@ -411,7 +411,7 @@ func TestRevocationReturnsOnlyUnspentAndLateChargeIsRecorded(t *testing.T) {
 
 func assertBalanced(t *testing.T, db *store.Store) {
 	t.Helper()
-	rows, err := db.DB.Query(`SELECT transaction_id,count(*),count(DISTINCT amount_wei),count(DISTINCT direction) FROM ledger_entries GROUP BY transaction_id`)
+	rows, err := db.DB.Query(`SELECT transaction_id,count(*),count(DISTINCT amount_units),count(DISTINCT direction) FROM ledger_entries GROUP BY transaction_id`)
 	require.NoError(t, err)
 	defer rows.Close()
 	for rows.Next() {

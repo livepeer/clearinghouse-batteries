@@ -380,7 +380,7 @@ func setupBenchmarkCredentials(ctx context.Context, path string, layout benchmar
 		allocationCount = 1
 	}
 	grantAmount := new(big.Int).Mul(new(big.Int).Set(allocationAmount), big.NewInt(allocationCount))
-	grant, err := db.Create(ctx, "grant", store.Create{Name: "benchmark", Amount: grantAmount.String(), Status: "active"})
+	grant, err := db.Create(ctx, "grant", store.Create{Name: "benchmark", Amount: grantAmount.String(), Currency: "eth", Status: "active"})
 	if err != nil {
 		return nil, err
 	}
