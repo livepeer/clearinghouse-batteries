@@ -65,6 +65,7 @@ type ServeParams struct {
 	WebhookTokenFile      string        `secretfor:"WebhookToken" descr:"File containing the signer-to-clearinghouse shared token"`
 	KafkaBind             string        `default:"127.0.0.1:9092" descr:"Embedded broker IP:port (loopback or private)"`
 	KafkaTopic            string        `default:"livepeer-signing" descr:"Kafka topic for issued tickets"`
+	KafkaAuthFile         string        `name:"kafka-auth-file" optional:"true" file:"true" descr:"JSON file with Kafka read and write users"`
 	RPCURL                string        `name:"rpc-url" optional:"true" secret:"true" descr:"On-chain RPC URL"`
 	RPCURLFile            string        `name:"rpc-url-file" secretfor:"RPCURL" descr:"File containing the on-chain RPC URL"`
 	ChainID               string        `name:"chain-id" optional:"true" descr:"Optional assertion for the RPC chain ID"`
@@ -108,6 +109,9 @@ func (p ServeParams) Validate() error {
 			return fmt.Errorf("invalid Kafka broker address %q: expected host:port", p.KafkaBroker)
 		}
 	}
+	if p.KafkaAuthFile != "" && !p.EnableKafka && !p.EnableAccounting {
+		return errors.New("--kafka-auth-file requires --enable-kafka or --enable-accounting")
+	}
 	if p.EnableKafka || p.EnableAccounting {
 		if !regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$`).MatchString(p.KafkaTopic) {
 			return errors.New("invalid Kafka topic")
@@ -146,6 +150,10 @@ func (p ServeParams) Validate() error {
 
 func Serve(ctx context.Context, p ServeParams) error {
 	if err := p.Validate(); err != nil {
+		return err
+	}
+	access, kafkaDialer, err := p.kafkaSecurity()
+	if err != nil {
 		return err
 	}
 	webhookBind := ""
@@ -191,14 +199,14 @@ func Serve(ctx context.Context, p ServeParams) error {
 	brokerAddr := p.KafkaBroker
 	if p.EnableKafka {
 		var err error
-		broker, err = kafka.OpenBroker(ctx, p.KafkaBind, p.KafkaTopic, filepath.Dir(p.DBPath))
+		broker, err = kafka.OpenBroker(ctx, p.KafkaBind, p.KafkaTopic, filepath.Dir(p.DBPath), access)
 		if err != nil {
 			return err
 		}
 		defer broker.Close()
 		brokerAddr = broker.Addr()
 	}
-	k := &kafka.Listener{DB: db, Broker: brokerAddr, Topic: p.KafkaTopic}
+	k := &kafka.Listener{DB: db, Broker: brokerAddr, Topic: p.KafkaTopic, Dialer: kafkaDialer}
 	c := &chain.Listener{DB: db, Config: p.chainConfig()}
 	done := make(chan error, 5)
 	count := 0

@@ -24,7 +24,7 @@ func TestRealBrokerRestartAndReplay(t *testing.T) {
 	ctx := context.Background()
 	start := func() (*Listener, func()) {
 		t.Helper()
-		broker, err := OpenBroker(ctx, testutil.Port(t), "events", dir)
+		broker, err := OpenBroker(ctx, testutil.Port(t), "events", dir, nil)
 		require.NoError(t, err)
 		l := &Listener{DB: f.DB, Broker: broker.Addr(), Topic: "events"}
 		runCtx, cancel := context.WithCancel(ctx)
@@ -98,7 +98,7 @@ func TestAllPartitionsRestartAndReplay(t *testing.T) {
 	require.NoError(t, backend.Close())
 	start := func() (*minikafka.Broker, func()) {
 		t.Helper()
-		broker, err := OpenBroker(ctx, "127.0.0.1:0", "events", dir)
+		broker, err := OpenBroker(ctx, "127.0.0.1:0", "events", dir, nil)
 		require.NoError(t, err)
 		listener := &Listener{DB: f.DB, Broker: broker.Addr(), Topic: "events"}
 		runCtx, stop := context.WithCancel(ctx)
@@ -214,7 +214,7 @@ func TestConsumerFailureStopsAllPartitions(t *testing.T) {
 
 func TestBrokerUsesDirectoryPathVerbatim(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "data.v1")
-	broker, err := OpenBroker(context.Background(), "127.0.0.1:0", "events", dir)
+	broker, err := OpenBroker(context.Background(), "127.0.0.1:0", "events", dir, nil)
 	require.NoError(t, err)
 	require.NoError(t, broker.Close())
 	require.FileExists(t, filepath.Join(dir, "minikafka_+meta.db"))
@@ -223,7 +223,7 @@ func TestBrokerUsesDirectoryPathVerbatim(t *testing.T) {
 
 func TestBrokerUsesCurrentDirectory(t *testing.T) {
 	t.Chdir(t.TempDir())
-	broker, err := OpenBroker(context.Background(), "127.0.0.1:0", "events", ".")
+	broker, err := OpenBroker(context.Background(), "127.0.0.1:0", "events", ".", nil)
 	require.NoError(t, err)
 	require.NoError(t, broker.Close())
 	require.FileExists(t, "minikafka_+meta.db")
@@ -236,7 +236,7 @@ func TestBrokerConcurrentPublishAndShutdown(t *testing.T) {
 	dir := t.TempDir()
 	start := func() (*minikafka.Broker, context.Context, func()) {
 		t.Helper()
-		broker, err := OpenBroker(ctx, "127.0.0.1:0", "events", dir)
+		broker, err := OpenBroker(ctx, "127.0.0.1:0", "events", dir, nil)
 		require.NoError(t, err)
 		runCtx, stop := context.WithCancel(ctx)
 		done := make(chan error, 1)

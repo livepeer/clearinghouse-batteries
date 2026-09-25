@@ -17,6 +17,9 @@ EnableOnchainListener = false
 # The embedded Kafka broker should listen only on a trusted loopback or private network.
 KafkaBind = "127.0.0.1:9092"
 KafkaTopic = "livepeer-signing"
+# Optional JSON secret with distinct read and write credentials. The broker
+# accepts both SASL/PLAIN and SASL/SCRAM-SHA-512 when this is set.
+# KafkaAuthFile = "/run/secrets/clearinghouse-kafka-auth.json"
 
 # For external plaintext Kafka, set EnableKafka = false, keep EnableAccounting = true,
 # and provide its address. Do not use KafkaBroker with embedded Kafka.

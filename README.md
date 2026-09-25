@@ -130,12 +130,36 @@ To run the accounting service with an external Kafka broker:
 Use `--kafka-topic` to select the topic configured on the signer. External broker
 addresses cannot be combined with `--enable-kafka`.
 
+### Kafka authentication
+
+To require authentication on the embedded broker, put separate read and write
+credentials in a JSON file readable only by the clearinghouse process:
+
+```json
+{
+  "read": {"username": "accounting", "password": "READ_SECRET"},
+  "write": {"username": "producer", "password": "WRITE_SECRET"}
+}
+```
+
+Pass its path with `--kafka-auth-file` when running `--enable-kafka`. MiniKafka
+grants the read user topic read access and the write user topic write access to
+`--kafka-topic`; the users must be distinct. The embedded broker always accepts
+both SASL/PLAIN and SASL/SCRAM-SHA-512. When accounting runs in the same
+process, it authenticates as the read user using SCRAM-SHA-512. Without an auth
+file, the embedded broker remains unauthenticated. MiniKafka's read grant also
+permits Kafka consumer-group offset commits; Clearinghouse keeps its own
+checkpoints in SQLite.
+
+For an external broker, Clearinghouse uses the auth file's `read` entry. The
+external broker must be pre-configured with the user and its topic permissions.
+
 Run at most one accounting service and one on-chain listener per accounting
 database. Keep SQLite on a local filesystem; do not share it over a network
 filesystem.
 
-Kafka connections use plaintext. Keep brokers on a trusted loopback or private
-network and restrict access with a firewall.
+Use a TLS proxy for Kafka, or keep brokers on a trusted loopback or private
+network and restrict access with a firewall. Use SCRAM-SHA-512 where possible.
 
 ### Enable on-chain reporting
 

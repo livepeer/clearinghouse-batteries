@@ -2,6 +2,7 @@
 package kafka
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -23,12 +24,13 @@ type Listener struct {
 	DB     *store.Store
 	Broker string
 	Topic  string
+	Dialer *kgo.Dialer
 	Ready  atomic.Bool
 }
 
 // OpenBroker initializes persistent storage and binds the listener before returning.
 // The caller must run Serve and close the broker, including on startup failure.
-func OpenBroker(ctx context.Context, bind, topic, dir string) (*minikafka.Broker, error) {
+func OpenBroker(ctx context.Context, bind, topic, dir string, access *BrokerAccess) (*minikafka.Broker, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
 	}
@@ -47,7 +49,18 @@ func OpenBroker(ctx context.Context, bind, topic, dir string) (*minikafka.Broker
 		backend.Close()
 		return nil, err
 	}
-	broker, err := minikafka.Open(minikafka.Config{Addr: bind, Store: backend})
+	cfg := minikafka.Config{Addr: bind, Store: backend}
+	if access != nil {
+		cfg.SASL = &minikafka.SASLConfig{
+			Mechanisms: []minikafka.SASLMechanism{minikafka.SASLPlain, minikafka.SASLSCRAMSHA512},
+			Users:      map[string]string{access.Read.Username: access.Read.Password, access.Write.Username: access.Write.Password},
+		}
+		cfg.Authorization = &minikafka.AuthorizationConfig{Grants: []minikafka.TopicGrant{
+			{User: access.Read.Username, Topic: topic, Action: minikafka.TopicRead},
+			{User: access.Write.Username, Topic: topic, Action: minikafka.TopicWrite},
+		}}
+	}
+	broker, err := minikafka.Open(cfg)
 	if err != nil {
 		backend.Close()
 		return nil, err
@@ -112,6 +125,7 @@ func (l *Listener) openReader(ctx context.Context, partition int) (*kgo.Reader, 
 		Brokers:               []string{l.Broker},
 		Topic:                 l.Topic,
 		Partition:             partition,
+		Dialer:                l.Dialer,
 		MinBytes:              1,
 		MaxBytes:              10 << 20,
 		MaxWait:               100 * time.Millisecond,
@@ -149,7 +163,7 @@ func (l *Listener) readPartition(ctx context.Context, reader *kgo.Reader, next i
 func (l *Listener) partitions(ctx context.Context) ([]int, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	conn, err := kgo.DialContext(probeCtx, "tcp", l.Broker)
+	conn, err := cmp.Or(l.Dialer, kgo.DefaultDialer).DialContext(probeCtx, "tcp", l.Broker)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", l.Broker, err)
 	}
@@ -177,7 +191,7 @@ func (l *Listener) partitions(ctx context.Context) ([]int, error) {
 func (l *Listener) offsets(ctx context.Context, partition int) (int64, int64, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	conn, err := kgo.DialLeader(probeCtx, "tcp", l.Broker, l.Topic, partition)
+	conn, err := cmp.Or(l.Dialer, kgo.DefaultDialer).DialLeader(probeCtx, "tcp", l.Broker, l.Topic, partition)
 	if err != nil {
 		return 0, 0, fmt.Errorf("%s: %w", l.Broker, err)
 	}

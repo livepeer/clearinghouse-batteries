@@ -8,6 +8,7 @@
   "EnableOnchainListener": false,
   "KafkaBind": "127.0.0.1:9092",
   "KafkaTopic": "livepeer-signing",
+  "KafkaAuthFile": "",
   "Confirmations": 64,
   "PollInterval": "5s",
   "BlockBatchSize": 2000,

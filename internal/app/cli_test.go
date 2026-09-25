@@ -316,7 +316,7 @@ func TestAllComponentCombinations(t *testing.T) {
 			p.EnableAccounting = mask&8 != 0
 			producerAddr := p.KafkaBind
 			if p.EnableAccounting && !p.EnableKafka {
-				broker, err := kafka.OpenBroker(context.Background(), testutil.Port(t), p.KafkaTopic, filepath.Join(dir, "external"))
+				broker, err := kafka.OpenBroker(context.Background(), testutil.Port(t), p.KafkaTopic, filepath.Join(dir, "external"), nil)
 				require.NoError(t, err)
 				brokerCtx, stop := context.WithCancel(context.Background())
 				brokerDone := make(chan error, 1)
