@@ -9,133 +9,81 @@ import (
 	"time"
 
 	"github.com/livepeer/clearinghouse/internal/kafka"
+	"github.com/livepeer/clearinghouse/internal/serviceauth"
 	"github.com/livepeer/clearinghouse/internal/store"
 	"github.com/livepeer/clearinghouse/internal/testutil"
 	kgo "github.com/segmentio/kafka-go"
 	"github.com/segmentio/kafka-go/sasl/plain"
-	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 )
 
-func TestKafkaSecurityConfiguration(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "kafka-auth.json")
-	require.NoError(t, os.WriteFile(path, []byte(`{
-		"read":{"username":"accounting","password":"read-secret"},
-		"write":{"username":"producer","password":"write-secret"}
-	}`), 0600))
-	p := ServeParams{EnableKafka: true, EnableAccounting: true, KafkaAuthFile: path, KafkaBind: "127.0.0.1:9092", KafkaTopic: "events"}
-	require.NoError(t, p.Validate())
-	access, dialer, err := p.kafkaSecurity()
+func TestTOMLCredsFile(t *testing.T) {
+	data, err := os.ReadFile("../../creds.example.toml")
 	require.NoError(t, err)
-	require.Equal(t, "accounting", access.Read.Username)
-	require.Equal(t, "producer", access.Write.Username)
-	require.NotNil(t, dialer)
-
-	external := ServeParams{EnableAccounting: true, KafkaBroker: "broker:9092", KafkaTopic: "events", KafkaAuthFile: path}
-	require.NoError(t, external.Validate())
-	_, _, err = external.kafkaSecurity()
-	require.ErrorContains(t, err, "unknown field")
-	for _, field := range []string{`"write":{}`, `"write":null`, `"Write":{}`, `"read":{"unknown":true}`} {
-		require.NoError(t, os.WriteFile(path, []byte(`{"read":{"username":"accounting","password":"read-secret"},`+field+`}`), 0600))
-		_, _, err = external.kafkaSecurity()
-		require.ErrorContains(t, err, "unknown field")
+	contents := string(data)
+	for _, secret := range []string{"operator-secret", "signer-secret", "read-secret", "write-secret"} {
+		contents = strings.Replace(contents, `secret = ""`, `secret = "`+secret+`"`, 1)
 	}
-	require.NoError(t, os.WriteFile(path, []byte(`{"read":{"username":"accounting","password":"read-secret"}}`), 0600))
-	access, dialer, err = external.kafkaSecurity()
+	path := filepath.Join(t.TempDir(), "creds.toml")
+	require.NoError(t, os.WriteFile(path, []byte(contents), 0600))
+	registry, err := serviceauth.Load(path)
 	require.NoError(t, err)
-	require.Equal(t, "accounting", access.Read.Username)
+	require.Equal(t, 1, registry.Count("management"))
+	require.Equal(t, 1, registry.Count("webhook"))
+	p := ServeParams{EnableKafka: true, EnableAccounting: true}
+	access, dialer, err := p.kafkaSecurity(registry)
+	require.NoError(t, err)
+	require.Len(t, access, 2)
 	require.NotNil(t, dialer)
-
 }
 
-func TestKafkaSecurityRejectsInvalidConfiguration(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		p    ServeParams
-		want string
-	}{
-		{"auth without Kafka", ServeParams{EnableOnchainListener: true, KafkaAuthFile: "auth.json"}, "--kafka-auth-file requires"},
-	} {
-		t.Run(tc.name, func(t *testing.T) { require.ErrorContains(t, tc.p.Validate(), tc.want) })
-	}
-	path := filepath.Join(t.TempDir(), "kafka-auth.json")
-	p := ServeParams{EnableKafka: true, KafkaAuthFile: path}
-	for _, tc := range []struct {
-		name, data, want string
-	}{
-		{"same user", `{"read":{"username":"same","password":"a"},"write":{"username":"same","password":"b"}}`, "must be distinct"},
-		{"missing write", `{"read":{"username":"reader","password":"a"}}`, "write username and password"},
-		{"wildcard user", `{"read":{"username":"*","password":"a"},"write":{"username":"writer","password":"b"}}`, "invalid Kafka read credential"},
-		{"unknown field", `{"read":{"username":"reader","password":"a"},"write":{"username":"writer","password":"b"},"admin":true}`, "unknown field"},
-		{"trailing data", `{"read":{"username":"reader","password":"a"},"write":{"username":"writer","password":"b"}} true`, "one JSON object"},
-		{"oversized whitespace", `{"read":{"username":"reader","password":"a"},"write":{"username":"writer","password":"b"}}` + strings.Repeat(" ", maxKafkaAuthFileBytes), "64 KiB"},
+func TestKafkaRegistryConfiguration(t *testing.T) {
+	path := testCredsFile(t)
+	registry, err := serviceauth.Load(path)
+	require.NoError(t, err)
+	p := ServeParams{EnableKafka: true, EnableAccounting: true, CredsFile: path, KafkaBind: "127.0.0.1:9092", KafkaTopic: "events"}
+	require.NoError(t, p.Validate())
+	access, dialer, err := p.kafkaSecurity(registry)
+	require.NoError(t, err)
+	require.Len(t, access, 2)
+	require.NotNil(t, dialer)
+
+	external := ServeParams{EnableAccounting: true, KafkaBroker: "broker:9092", KafkaTopic: "events", CredsFile: path}
+	require.NoError(t, external.Validate())
+	access, dialer, err = external.kafkaSecurity(registry)
+	require.NoError(t, err)
+	require.Nil(t, access)
+	require.NotNil(t, dialer)
+
+	for _, tc := range []struct{ name, data, want string }{
+		{"missing write", `{"id":"r","secret":"secret","kafka":{"username":"reader","allow":["read"],"accounting":true}}`, "read and write"},
+		{"shared role", `{"id":"r","secret":"secret","kafka":{"username":"reader","allow":["read","write"],"accounting":true}}`, "must be distinct"},
+		{"missing accounting", `{"id":"r","secret":"a","kafka":{"username":"reader","allow":["read"]}},{"id":"w","secret":"b","kafka":{"username":"writer","allow":["write"]}}`, "accounting reader"},
+		{"missing secret", `{"id":"broken"}`, "missing required param"},
+		{"normalized duplicate", `{"id":"r","secret":"a","kafka":{"username":"reader","allow":["read"],"accounting":true}},{"id":"w","secret":"b","kafka":{"username":"read\u00ader","allow":["write"]}}`, "duplicate Kafka username"},
+		{"invalid writer secret", `{"id":"r","secret":"a","kafka":{"username":"reader","allow":["read"],"accounting":true}},{"id":"w","secret":"sensitive\u0007","kafka":{"username":"writer","allow":["write"]}}`, "Kafka secret"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			require.NoError(t, os.WriteFile(path, []byte(tc.data), 0600))
-			_, _, err := p.kafkaSecurity()
-			require.ErrorContains(t, err, tc.want)
+			p.CredsFile = testCredsFile(t, tc.data)
+			p.DBPath = filepath.Join(t.TempDir(), "accounting.db")
+			require.ErrorContains(t, Serve(t.Context(), p), tc.want)
+			files, err := os.ReadDir(filepath.Dir(p.DBPath))
+			require.NoError(t, err)
+			require.Empty(t, files, "invalid credentials must not create databases or lock files")
 		})
 	}
 }
 
-func TestKafkaSecurityCLIConfig(t *testing.T) {
+func TestExternalAccountingUsesRegistryCredential(t *testing.T) {
 	dir := t.TempDir()
-	authPath := filepath.Join(dir, "auth.json")
-	configPath := filepath.Join(dir, "serve.toml")
-	require.NoError(t, os.WriteFile(authPath, []byte(`{
-		"read":{"username":"accounting","password":"read-secret"},
-		"write":{"username":"producer","password":"write-secret"}
-	}`), 0600))
-	require.NoError(t, os.WriteFile(configPath, []byte("EnableKafka = true\nKafkaAuthFile = \""+authPath+"\"\n"), 0600))
-	read := func(args ...string) ServeParams {
-		t.Helper()
-		var got ServeParams
-		cmd := command[ServeParams]("serve", "test", func(p *ServeParams, _ *cobra.Command) error {
-			got = *p
-			return nil
-		})
-		cmd.SetArgs(args)
-		require.NoError(t, cmd.Execute())
-		return got
-	}
-	fromConfig := read("--config-file", configPath)
-	require.Equal(t, authPath, fromConfig.KafkaAuthFile)
-	t.Setenv("CLEARINGHOUSE_KAFKA_AUTH_FILE", authPath)
-	require.Equal(t, authPath, read("--config-file", configPath).KafkaAuthFile)
-	require.Equal(t, authPath, read("--kafka-auth-file", authPath).KafkaAuthFile)
-}
-
-func TestKafkaAuthFileFailsBeforeDatabaseOpen(t *testing.T) {
-	dir := t.TempDir()
-	authPath := filepath.Join(dir, "auth.json")
-	dbPath := filepath.Join(dir, "accounting.db")
-	require.NoError(t, os.WriteFile(authPath, []byte(`{"read":{}}`), 0600))
-	err := Serve(context.Background(), ServeParams{
-		Common: Common{DBPath: dbPath}, EnableKafka: true, EnableAccounting: true,
-		KafkaBind: "127.0.0.1:9092", KafkaTopic: "events", KafkaAuthFile: authPath,
-	})
-	require.ErrorContains(t, err, "read username and password")
-	require.NoFileExists(t, dbPath)
-}
-
-func TestExternalAccountingUsesReadCredentials(t *testing.T) {
-	dir := t.TempDir()
-	authPath := filepath.Join(dir, "auth.json")
-	require.NoError(t, os.WriteFile(authPath, []byte(`{"read":{"username":"accounting","password":"read-secret"}}`), 0600))
-	access := &kafka.BrokerAccess{
-		Read:  kafka.Credential{Username: "accounting", Password: "read-secret"},
-		Write: kafka.Credential{Username: "producer", Password: "write-secret"},
-	}
+	access := testRegistry(t).KafkaCredentials()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	broker, err := kafka.OpenBroker(ctx, "127.0.0.1:0", "events", filepath.Join(dir, "broker"), access)
 	require.NoError(t, err)
 	brokerDone := make(chan error, 1)
 	go func() { brokerDone <- broker.Serve(ctx) }()
-	p := ServeParams{
-		Common:           Common{DBPath: filepath.Join(dir, "accounts.db")},
-		EnableAccounting: true, KafkaBroker: broker.Addr(), KafkaTopic: "events", KafkaAuthFile: authPath,
-	}
+	p := ServeParams{Common: Common{DBPath: filepath.Join(dir, "accounts.db")}, EnableAccounting: true, KafkaBroker: broker.Addr(), KafkaTopic: "events", CredsFile: testCredsFile(t)}
 	appDone := make(chan error, 1)
 	go func() { appDone <- Serve(ctx, p) }()
 	t.Cleanup(func() {
@@ -144,11 +92,7 @@ func TestExternalAccountingUsesReadCredentials(t *testing.T) {
 		require.NoError(t, broker.Close())
 		require.NoError(t, <-brokerDone)
 	})
-
-	writer := kgo.NewWriter(kgo.WriterConfig{
-		Brokers: []string{broker.Addr()}, Topic: "events", BatchTimeout: time.Millisecond,
-		Dialer: &kgo.Dialer{SASLMechanism: plain.Mechanism{Username: access.Write.Username, Password: access.Write.Password}},
-	})
+	writer := kgo.NewWriter(kgo.WriterConfig{Brokers: []string{broker.Addr()}, Topic: "events", BatchTimeout: time.Millisecond, Dialer: &kgo.Dialer{SASLMechanism: plain.Mechanism{Username: "producer", Password: "write-secret"}}})
 	require.NoError(t, writer.WriteMessages(ctx, kgo.Message{Value: []byte(`{"id":"external-auth","type":"other","data":{}}`)}))
 	require.NoError(t, writer.Close())
 	testutil.Eventually(t, func() bool {

@@ -13,7 +13,7 @@ import (
 
 func TestUSDManagementInputsAndOutput(t *testing.T) {
 	f := testutil.New(t, "100")
-	handler := managementHandler(context.Background(), f.DB)
+	handler := managementHandler(context.Background(), f.DB, testRegistry(t))
 	grant := managementObject(t, managementRequest(t, handler, "POST", "/v1/grants", "application/json", `{"name":"USD grant","amount_usd":"2","status":"active"}`), http.StatusCreated)
 	grantID := grant["id"].(string)
 	allocation := managementObject(t, managementRequest(t, handler, "POST", "/v1/allocations", "application/json", `{"name":"USD allocation","grant_id":"`+grantID+`","amount_usd":"1.25"}`), http.StatusCreated)
@@ -67,7 +67,7 @@ func TestUsageCurrencyOutput(t *testing.T) {
 			raw, err = json.Marshal(envelope)
 			require.NoError(t, err)
 			require.NoError(t, f.DB.Ingest(ctx, "usage", 0, 1, raw))
-			response := managementRequest(t, managementHandler(ctx, f.DB), "GET", "/v1/usage", "", "")
+			response := managementRequest(t, managementHandler(ctx, f.DB, testRegistry(t)), "GET", "/v1/usage", "", "")
 			rows := managementArray(t, response, http.StatusOK)
 			require.Len(t, rows, 2)
 			require.JSONEq(t, response.Body.String(), cli(t, "usage", "list"))

@@ -15,6 +15,7 @@ import (
 
 	"github.com/j0sh/minikafka"
 	"github.com/j0sh/minikafka/storage/sqlite"
+	"github.com/livepeer/clearinghouse/internal/serviceauth"
 	"github.com/livepeer/clearinghouse/internal/store"
 	kgo "github.com/segmentio/kafka-go"
 	"golang.org/x/sync/errgroup"
@@ -30,7 +31,7 @@ type Listener struct {
 
 // OpenBroker initializes persistent storage and binds the listener before returning.
 // The caller must run Serve and close the broker, including on startup failure.
-func OpenBroker(ctx context.Context, bind, topic, dir string, access *BrokerAccess) (*minikafka.Broker, error) {
+func OpenBroker(ctx context.Context, bind, topic, dir string, credentials []serviceauth.KafkaCredential) (*minikafka.Broker, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
 	}
@@ -50,15 +51,8 @@ func OpenBroker(ctx context.Context, bind, topic, dir string, access *BrokerAcce
 		return nil, err
 	}
 	cfg := minikafka.Config{Addr: bind, Store: backend}
-	if access != nil {
-		cfg.SASL = &minikafka.SASLConfig{
-			Mechanisms: []minikafka.SASLMechanism{minikafka.SASLPlain, minikafka.SASLSCRAMSHA512},
-			Users:      map[string]string{access.Read.Username: access.Read.Password, access.Write.Username: access.Write.Password},
-		}
-		cfg.Authorization = &minikafka.AuthorizationConfig{Grants: []minikafka.TopicGrant{
-			{User: access.Read.Username, Topic: topic, Action: minikafka.TopicRead},
-			{User: access.Write.Username, Topic: topic, Action: minikafka.TopicWrite},
-		}}
+	if credentials != nil {
+		cfg.SASL, cfg.Authorization = brokerConfig(topic, credentials)
 	}
 	broker, err := minikafka.Open(cfg)
 	if err != nil {

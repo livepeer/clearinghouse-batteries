@@ -1,39 +1,31 @@
 # Livepeer grants clearinghouse
 
-The clearinghouse manages budgets for Livepeer remote signing. It provides:
-
-- grant and allocation management;
-- API-key authorization for gateways;
-- accounting for issued tickets;
-- on-chain payment reporting.
-
-All bookkeeping is done with a local SQLite database.
+The clearinghouse manages grants, allocations, and gateway API keys for Livepeer
+remote signing. It accounts for issued tickets and on-chain payments in SQLite.
 
 ## How accounting works
 
-A grant provides a budget that can be divided into allocations. Gateways use API
-keys associated with those allocations to request signing authorization.
+Grants provide budgets; allocations divide them among gateways. Each gateway
+uses an allocation's API key to request signing authorization. The signer logs
+issued tickets to Kafka, and the accounting service validates and charges them.
+The authorization webhook checks the allocation's available balance.
 
-The signer uses Kafka as a durable event log of issued tickets. The accounting
-service validates events against authorized sessions and records their charges
-in the internal ledger. The authorization webhook uses the available allocation
-balance to decide whether signing may continue.
-
-Accounting is asynchronous: authorization does not reserve funds, so delayed
-events can take an allocation negative before further signing is stopped. Monitor
-accounting lag, quarantined events, and negative balances.
+Authorization does not reserve funds. Delayed accounting can take an allocation
+negative before signing stops. Monitor accounting lag and quarantined events.
 
 The optional on-chain listener records payments and escrow (deposit + reserve)
-activity and matches settlement to signing sessions. Settlement does not charge
-a grant a second time.
+activity and matches settlements to signing sessions without charging grants
+again.
 
 ## Quick start
 
-Build the executable, initialize the database, and create a funded grant:
+This starts the webhook, embedded Kafka broker, and accounting service. Run the
+HTTP and Kafka listeners behind terminating TLS proxies.
+
+Build, initialize the database, and create a funded grant:
 
 ```sh
 make build
-
 ./bin/clearinghouse migrate up
 ./bin/clearinghouse grant create \
   --name 'Developer grants' \
@@ -42,14 +34,7 @@ make build
   --status active
 ```
 
-By default, the SQLite accounting and embedded Kafka databases are stored in
-the current working directory as `clearinghouse.db` and `minikafka_*.db`.
-Kafka databases are always stored beside the accounting database selected by
-`--db-path`. The explicit migration is needed because the management command
-that follows does not apply migrations; `serve` applies pending migrations
-automatically.
-
-Copy the returned grant ID, then create an allocation and API key:
+Use the returned grant ID to create an allocation and API key:
 
 ```sh
 ./bin/clearinghouse api-key create \
@@ -58,45 +43,56 @@ Copy the returned grant ID, then create an allocation and API key:
   --amount-eth 0.1
 ```
 
-The response contains `allocation_id`, key `id`, and `api_key`. Store the API key
-securely: its secret is shown only once.
+The response includes `allocation_id`, key `id`, and `api_key`. Store the key;
+its secret is shown only once.
 
-Start the authorization webhook, embedded Kafka broker, and accounting service:
+Copy [`creds.example.toml`](creds.example.toml), replace each empty secret with a
+distinct random value, and restrict file access to the clearinghouse process.
+Remove the `operator` entry if you do not need the management API, then start:
 
 ```sh
-export CLEARINGHOUSE_WEBHOOK_TOKEN='a-long-random-shared-token'
-
 ./bin/clearinghouse serve \
+  --creds-file /run/secrets/clearinghouse-creds.toml \
   --enable-auth-webhook :8080 \
   --enable-kafka \
   --enable-accounting
 ```
 
+Use a certificate trusted by clients and configure the proxy endpoints below.
+Replace the hostname with yours. The Kafka proxy terminates TLS and forwards
+TCP traffic; accounting connects to the broker locally.
+
+| Client endpoint | Local listener |
+| --- | --- |
+| `https://clearinghouse.example.com` | `http://127.0.0.1:8080` |
+| `clearinghouse.example.com:9093` (Kafka over TLS) | `127.0.0.1:9092` |
+
 ### Connect go-livepeer
 
-Add the generated API key to the gateway's remote-signer headers:
+Set the gateway's remote-signer header:
 
 ```text
 -remoteSignerHeaders "Authorization:Bearer lpg_..."
 ```
 
-Configure the remote signer to use the clearinghouse webhook and Kafka topic:
+Configure the remote signer:
 
 ```text
--remoteSignerWebhookUrl http://127.0.0.1:8080/v1/signer/authorize
--remoteSignerWebhookHeaders "Livepeer-Clearinghouse-Token:a-long-random-shared-token"
+-remoteSignerWebhookUrl https://clearinghouse.example.com/v1/signer/authorize
+-remoteSignerWebhookHeaders "Livepeer-Clearinghouse-Token:SIGNER_SECRET"
 -monitor
--kafkaBootstrapServers 127.0.0.1:9092
+-kafkaBootstrapServers clearinghouse.example.com:9093
 -kafkaGatewayTopic livepeer-signing
 ```
 
-The shared webhook token authenticates the signer. The gateway API key belongs in
-the nested `Authorization` header sent by the signer, not in the outer webhook
-request.
+Use the `signer` entry's secret for `SIGNER_SECRET`. Through your secret manager,
+set go-livepeer's `LP_KAFKAUSER` to `producer` and `LP_KAFKAPASSWORD` to the
+`producer` entry's secret. The producer uses SASL/PLAIN over TLS.
 
-### Inspect balances
+The outer webhook header authenticates the signer. The gateway API key is sent
+in the request body's nested `Authorization` header.
 
-After signing requests, inspect the account balances:
+After accounting applies ticket events, inspect balances:
 
 ```sh
 ./bin/clearinghouse ledger report
@@ -106,80 +102,48 @@ After signing requests, inspect the account balances:
 
 ### Run the services
 
-`serve` can run any combination of these components:
+Enable one or more components:
 
-- `--enable-auth-webhook `:PORT` — signer authorization HTTP server;
-- `--enable-management-api `:PORT` — account management HTTP API;
+- `--enable-auth-webhook :PORT` — signer authorization;
+- `--enable-management-api :PORT` — account management HTTP API;
 - `--enable-kafka` — embedded Kafka broker;
-- `--enable-accounting` — accounting service;
-- `--enable-onchain-listener` — on-chain payment listener.
+- `--enable-accounting` — ticket accounting;
+- `--enable-onchain-listener` — on-chain reporting.
 
-Enable at least one component. Enable both `--enable-kafka` and
-`--enable-accounting` to use the embedded broker with the accounting service;
-the connection is configured automatically. The broker can also run independently.
-The management API can run on its own or alongside the other components.
+With both `--enable-kafka` and `--enable-accounting`, the local broker connection
+is automatic. The broker defaults to `127.0.0.1:9092` and topic
+`livepeer-signing`. Producers connect through its TLS proxy.
 
-To run the accounting service with an external Kafka broker:
+For an external broker, omit `--enable-kafka`:
 
 ```sh
 ./bin/clearinghouse serve \
+  --creds-file /run/secrets/clearinghouse-creds.toml \
   --enable-accounting \
   --kafka-broker broker:9092
 ```
 
-Use `--kafka-topic` to select the topic configured on the signer. External broker
-addresses cannot be combined with `--enable-kafka`.
-
-### Kafka authentication
-
-To require authentication on the embedded broker, put separate read and write
-credentials in a JSON file readable only by the clearinghouse process:
-
-```json
-{
-  "read": {"username": "accounting", "password": "READ_SECRET"},
-  "write": {"username": "producer", "password": "WRITE_SECRET"}
-}
-```
-
-Pass its path with `--kafka-auth-file` when running `--enable-kafka`. MiniKafka
-grants the read user topic read access and the write user topic write access to
-`--kafka-topic`; the users must be distinct. The embedded broker always accepts
-both SASL/PLAIN and SASL/SCRAM-SHA-512. When accounting runs in the same
-process, it authenticates as the read user using SCRAM-SHA-512. Without an auth
-file, the embedded broker remains unauthenticated. MiniKafka's read grant also
-permits Kafka consumer-group offset commits; Clearinghouse keeps its own
-checkpoints in SQLite.
-
-For an external broker, Clearinghouse uses the auth file's `read` entry. The
-external broker must be pre-configured with the user and its topic permissions.
-
-Run at most one accounting service and one on-chain listener per accounting
-database. Keep SQLite on a local filesystem; do not share it over a network
-filesystem.
-
-Use a TLS proxy for Kafka, or keep brokers on a trusted loopback or private
-network and restrict access with a firewall. Use SCRAM-SHA-512 where possible.
+Set `--kafka-topic` to match the signer. External accounting uses plaintext TCP;
+configure the broker's users and permissions separately. If go-livepeer shares
+this broker, provide TLS for its producer and a private plaintext connection
+for accounting, both using the same cluster and topic.
 
 ### Enable on-chain reporting
 
 On Arbitrum One, the listener derives the chain ID from the RPC provider and
-discovers Livepeer's registered TicketBroker automatically:
+discovers Livepeer's registered TicketBroker:
 
 ```sh
 ./bin/clearinghouse serve \
   --enable-onchain-listener \
-  --rpc-url https://YOUR_RPC \
+  --rpc-url-file /run/secrets/clearinghouse-rpc-url \
   --signer-addresses 0xYOUR_SIGNER
 ```
 
-Use `--start-block` to include earlier activity; otherwise a new database starts
-at the current RPC head. The listener resumes from its saved progress on restart.
-Your RPC provider must support historical queries for the selected starting point.
-
-Use a separate accounting database for each chain, TicketBroker, and signer set.
-
-Inspect the results with:
+A new database starts at the current RPC head unless `--start-block` is set;
+restarts resume saved progress. The RPC provider must support historical queries
+from that block. Use a separate database for each chain, TicketBroker, and signer
+set.
 
 ```sh
 ./bin/clearinghouse settlement list
@@ -188,8 +152,6 @@ Inspect the results with:
 ```
 
 ### Create an allocation with its own API keys
-
-To manage an allocation separately from its keys, create the allocation first:
 
 ```sh
 ./bin/clearinghouse allocation create \
@@ -203,139 +165,152 @@ To manage an allocation separately from its keys, create the allocation first:
   --name gateway
 ```
 
-Allocation creation and funding accept `--amount-eth all` to use the grant's full
-current unallocated balance.
+Allocation creation and funding accept `--amount-eth all` to use the grant's
+full unallocated balance.
 
 ## Reference
 
-### Configuration
+### Service credentials
 
-Run `./bin/clearinghouse serve --help` or a management command with `--help` to see
-its flags, environment variables, and defaults. Every command accepts `--db-path`
-and `--config-file`. Options marked with an environment variable in --help can
-also be configured through the environment.
+Service credentials authenticate management clients, signers, and Kafka clients.
+Gateway API keys authorize signing against allocations and are created separately.
+Local CLI commands use the database directly and need no service credentials.
 
-Configuration precedence:
+`--creds-file` is required for the management API, webhook, or embedded Kafka.
+Use [`creds.example.toml`](creds.example.toml) or
+[`creds.example.json`](creds.example.json); omit unused entries. Each entry has
+one `management`, `webhook`, or `kafka` block, a unique `id` (1–64 ASCII letters,
+digits, `_`, or `-`), and a distinct nonempty `secret`. Unknown fields are rejected.
+
+Generate secrets with at least 32 random bytes, for example `openssl rand -hex 32`.
+For HTTP, send the secret as-is in `Livepeer-Clearinghouse-Token`; the `id` is not
+sent. HTTP secrets must be valid header values without leading or trailing
+spaces or tabs. The TOML/JSON file may end with a newline.
+
+After changing secrets or permissions, update affected clients or broker users
+and restart clearinghouse.
+
+#### Management permissions
+
+`allow` lists use `resource.action`. A permission covers all resources of that
+type; `resource.*` includes current and future actions. Unknown permissions are
+rejected. For reporting access, allow only the needed `read` permissions.
+
+| Resource | Actions |
+| --- | --- |
+| `grants` | `read`, `create`, `fund`, `status` |
+| `allocations` | `read`, `create`, `fund`, `status`, `revoke` |
+| `api_keys` | `read`, `create`, `revoke` |
+| `sessions` | `read`, `revoke` |
+| `settlements`, `usage`, `ledger`, `escrow` | `read` |
+
+Creating a grant or allocation with nonzero funding needs both `create` and
+`fund`; allocation creation with `all` also needs `fund`. Zero or omitted
+amounts need only `create`.
+
+API-key creation with `grant_id` needs `api_keys.create`, `allocations.create`,
+and `allocations.fund`, even for zero funding. With an existing `allocation_id`,
+it needs only `api_keys.create`.
+
+#### Webhook and Kafka credentials
+
+Webhook entries set `authorize = true` to authenticate the signer.
+
+Kafka entries use `username`, `allow` (`read` or `write`), and `secret` as the
+password. Usernames must be unique, including after SCRAM normalization.
+Embedded Kafka requires separate read and write users, limits access to
+`--kafka-topic`, and accepts SASL/PLAIN and SASL/SCRAM-SHA-512.
+
+Embedded accounting requires exactly one read credential with `accounting = true`.
+The accounting client uses SCRAM-SHA-512. For external accounting this credential
+is optional; without it, the client uses no SASL authentication. External broker
+permissions must be configured on the broker.
+
+### Configuration and commands
+
+Run `./bin/clearinghouse --help` or `<command> --help` for commands, flags,
+environment variables, and defaults. Every command accepts `--db-path` and
+`--config-file`. Configuration precedence is:
 
 ```text
 flags > environment > configuration file > defaults
 ```
 
-Both TOML and JSON configuration files are supported. Start with
-[`config.example.toml`](config.example.toml) or
-[`config.example.json`](config.example.json). Configuration keys use the field
-names shown in those examples.
+Start with [`config.example.toml`](config.example.toml) or
+[`config.example.json`](config.example.json). Set the credentials file path with
+`--creds-file`, `CLEARINGHOUSE_CREDS_FILE`, or `CredsFile`.
 
-Secrets can be provided directly through the environment or via a local mounted
-secret file.
+Supply the RPC URL via `CLEARINGHOUSE_RPC_URL`, or a file selected by
+`--rpc-url-file`, `CLEARINGHOUSE_RPC_URL_FILE`, or `RPCURLFile`. Direct RPC URL
+flags and configuration values are rejected. The URL file is read verbatim;
+write the URL without a trailing newline.
 
-| Secret | Direct environment | File environment | File flag | Configuration key |
-| --- | --- | --- | --- | --- |
-| Authorization webhook token | `CLEARINGHOUSE_WEBHOOK_TOKEN` | `CLEARINGHOUSE_WEBHOOK_TOKEN_FILE` | `--webhook-token-file` | `WebhookTokenFile` |
-| On-chain RPC URL | `CLEARINGHOUSE_RPC_URL` | `CLEARINGHOUSE_RPC_URL_FILE` | `--rpc-url-file` | `RPCURLFile` |
+The accounting database defaults to `clearinghouse.db` in the working directory.
+Embedded Kafka's `minikafka_*.db` files are stored beside the database selected
+by `--db-path`.
 
-Direct secret flags and configuration values are not accepted. Secret file
-contents are used verbatim, so avoid a trailing newline unless it is part of the
-secret.
+| Command | Purpose |
+| --- | --- |
+| `serve` | Run services. |
+| `grant`, `allocation` | Manage budgets, funding, and status. |
+| `api-key`, `session` | Create or inspect API keys; inspect sessions; revoke either. |
+| `usage`, `ledger` | Inspect applied/quarantined events and accounting balances. |
+| `settlement`, `escrow` | Inspect redemptions, session attribution, balances, and payment activity. |
+| `migrate` | Apply, inspect, or roll back migrations. |
 
-### Commands
+### Amounts and states
 
-Run `./bin/clearinghouse --help` to list available commands. Run
-`./bin/clearinghouse <command> --help` for its subcommands, options,
-environment variables, and defaults.
+Amounts use `--amount-usd` or `--amount-eth` (`amount_usd` / `amount_eth` in the
+API): exact decimals with up to 18 fractional digits. New grants default to
+USD $0 if the amount is omitted. Allocations inherit their grant's currency.
+Allocation creation and funding
+accept `all`. JSON amounts are decimal `*_usd` or `*_eth` strings.
 
-- `serve` — Run the authorization, management, Kafka, accounting, and on-chain services.
-- `grant` — Create and manage grant budgets.
-- `allocation` — Divide grants into allocations and manage their funding and status.
-- `api-key` — Create, list, and revoke API keys.
-- `session` — Inspect and revoke payment sessions.
-- `usage` — Inspect applied and quarantined Kafka events.
-- `ledger` — Report exact accounting balances.
-- `settlement` — Inspect treasury redemptions and session attribution.
-- `escrow` — Report on-chain balances and payment activity.
-- `migrate` — Apply, inspect, or roll back database migrations.
+Signer events missing USD or ETH amounts are quarantined. On-chain escrow and
+settlements remain in ETH.
 
-### Amounts and allocation states
+Grants default to `draft`. Allocations default to `active`, or `exhausted` with
+zero funding. Exhaustion is automatic; funding reactivates exhausted allocations
+but leaves paused ones paused. Closed grants and revoked allocations cannot be
+reopened.
 
-Grant and allocation amounts use explicit `--amount-usd` or `--amount-eth`
-flags (or `amount_usd` / `amount_eth` API fields). Values are exact decimals
-with up to 18 fractional digits. New grants default to USD $0 if neither amount
-is provided. Allocations inherit their grant's currency and funding must use
-that currency. Allocation creation and funding accept `all` in the amount field.
-JSON output includes `currency` and decimal `*_usd` or `*_eth` amount fields.
+Allocation status updates accept `active` or `paused`. To revoke and return
+unused funds, use `allocation revoke` or `POST /v1/allocations/{id}/revoke`
+(`allocations.revoke` permission). Revocation is not a status update.
 
-If USD or ETH is missing from the signer usage event, then the event is
-quarantined. On-chain escrow and settlement remain denominated in ETH.
+### Database management
 
-Grant creation defaults to `draft`. Allocation creation defaults to `active`, or
-`exhausted` when it receives zero funding. Funding an exhausted allocation
-reactivates it; explicitly paused allocations remain paused. Revoked allocations
-and closed grants cannot be reopened.
+`serve` applies pending migrations. Before running CLI management or reports on
+a new database, run `migrate up`. `migrate down` can destroy accounting data; use
+it only on disposable databases or after a verified backup.
 
-### Security
+For backups, use Litestream or stop all clearinghouse processes and management
+commands and copy the accounting and Kafka databases, including WAL/SHM files,
+as one consistent set. Test restoration regularly.
 
-See [SECURITY.md](SECURITY.md) for deployment security recommendations.
+### HTTP listeners
 
-### Database Management
+Both HTTP listeners require an explicit port: `:8080` binds to `127.0.0.1:8080`.
+Use IPv4 or bracketed IPv6 literals. Non-loopback and wildcard binds require
+`--unsafe-http-bind`, which adds no TLS or access control. The webhook and
+management API must use different ports; expose them through TLS proxies.
 
-#### Back-Ups
+The webhook provides `POST /v1/signer/authorize` and requires a webhook credential.
+Both listeners provide unauthenticated health routes:
 
-There are several options for database back-up:
-
-1. Use Litestream.
-
-2. Stop all clearinghouse processes and management commands. Copy the accounting
-   and Kafka databases, including their WAL/SHM files. Restore everything as one
-   consistent set.
-
-3. Use Litestream.
-
-Validate backups regularly.
-
-#### Migrations
-
-Long-lived services that use the accounting database (eg, via `serve`) apply
-pending migrations at startup.
-
-For short-lived management or report commands against a new database, run
-`migrate up` first.
-
-`migrate down` rolls back the latest migration and can destroy accounting data.
-Use it only on a disposable database or after a verified backup.
-
-
-### HTTP endpoints and Binding
-
-The `--enable-auth-webhook` flag surfaces these endpoints:
-
-* `POST /v1/signer/authorize` Remote signer authorization
-* `GET /livez` Returns 200 OK whenever the server can answer
-* `GET /readyz` Returns 503 if the server is shutting down or the database is unavailable, 200 otherwise.
-
-The authorization webhook has no default bind and requires at least a port.
-`--enable-auth-webhook :8080` enables it on `127.0.0.1:8080`. Bind addresses
-must be IPv4 or bracketed IPv6 literals. Non-loopback and wildcard addresses
-additionally require `--unsafe-http-bind`. Remote access usually requires a
-terminating TLS proxy in front of the port.
-
-A webhook token is also required; specify via CLEARINGHOUSE_WEBHOOK_TOKEN and
-configure go-livepeer as indicated in [Connect go-livepeer](#Connect-go-livepeer).
+- `GET /livez` — 200 while the server can answer.
+- `GET /readyz` — 503 during shutdown or database failure; otherwise 200.
 
 ### Management HTTP API
 
-Enable the management listener on a port distinct from the webhook:
-
 ```sh
-./bin/clearinghouse serve --enable-management-api :8081
+./bin/clearinghouse serve \
+  --creds-file /run/secrets/clearinghouse-creds.toml \
+  --enable-management-api :8081
 ```
 
-The management API has no authentication and no default bind.
-`--enable-management-api :8081` listens on `127.0.0.1:8081`. Bind addresses
-must be IPv4 or bracketed IPv6 literals. Non-loopback and wildcard addresses
-require `--unsafe-http-bind`; that flag does not add TLS or access control.
-Remote access usually requires a terminating TLS proxy in front of the port.
-
-Management routes are versioned under `/v1`:
+Resource routes require management credentials. The examples use a TLS proxy at
+`https://management.clearinghouse.example.com`, forwarding to `127.0.0.1:8081`.
 
 | Resources | Routes |
 | --- | --- |
@@ -344,37 +319,44 @@ Management routes are versioned under `/v1`:
 | API keys | `GET, POST /v1/api-keys`; `POST /v1/api-keys/{id}/revoke` |
 | Sessions | `GET /v1/sessions`; `GET /v1/sessions/{id}`; `POST /v1/sessions/{id}/revoke` |
 | Reports | `GET /v1/settlements`, `/v1/usage`, `/v1/ledger/report`, `/v1/escrow/report`, `/v1/escrow/activity` |
-| Health | `GET /livez`, `GET /readyz` |
 
-Input bodies accept `multipart/form-data`, `application/x-www-form-urlencoded`,
-and JSON. Field names are snake_case. Amounts use exact decimal strings in
-`amount_usd` or `amount_eth`; allocation funding also accepts `all`. For example:
+Bodies accept JSON, `multipart/form-data`, or `application/x-www-form-urlencoded`,
+with snake_case fields and decimal strings for amounts:
 
 ```sh
-curl -F name='Developer grants' -F amount_usd=100 -F status=active \
-  http://127.0.0.1:8081/v1/grants
+curl -H 'Livepeer-Clearinghouse-Token: OPERATOR_SECRET' \
+  -F name='Developer grants' -F amount_usd=100 -F status=active \
+  https://management.clearinghouse.example.com/v1/grants
 
-curl -H 'Content-Type: application/json' \
+curl -H 'Livepeer-Clearinghouse-Token: OPERATOR_SECRET' \
+  -H 'Content-Type: application/json' \
   -d '{"grant_id":"GRANT_ID","name":"gateway","amount_usd":"25"}' \
-  http://127.0.0.1:8081/v1/api-keys
+  https://management.clearinghouse.example.com/v1/api-keys
 ```
 
-The API returns the same resource field names and types as the CLI JSON,
-including `*_usd` and `*_eth` strings, millisecond timestamps, and string-valued
-`metadata`. An item route returns one object. API key creation returns the
-secret once; subsequent lists omit it. Lists have no filtering or pagination.
-Migrations remain CLI-only. Error responses contain an `error` string and use
-400 for invalid input, 404 for missing resources, 409 for state or balance
-conflicts, and 500 for unexpected failures.
+Responses use the CLI's JSON fields and types, including decimal amount strings,
+millisecond timestamps, and string `metadata`. Item routes return one object;
+lists have no filtering or pagination. New API-key secrets are returned once.
+Migrations are CLI-only.
+
+Missing or invalid credentials, or credentials for another service, return `401`.
+Missing route permissions return `403`. Both use plain text. Additional funding
+permission failures return `403` with a JSON `error` string. Other errors from
+resource handlers also use JSON `error` strings:
+
+| Status | Meaning |
+| --- | --- |
+| `400` | Invalid input. |
+| `404` | Missing resource. |
+| `409` | State or balance conflict. |
+| `413` | Body exceeds 1 MiB. |
+| `415` | Unsupported or missing content type. |
+| `500` | Unexpected failure. |
 
 ## Development
 
-Building requires Go 1.27.1, CGO, and a C compiler for SQLite.
+Builds require Go 1.27.1, CGO, and a C compiler for SQLite. `make check` runs
+race-enabled tests, `go vet`, and a production build. Tests use local fixtures
+without a live chain or production credentials.
 
-```sh
-make build
-make check
-```
-
-`make check` runs the race-enabled tests, `go vet`, and a production build. Tests
-use local fixtures and do not require a live chain or production credentials.
+See [SECURITY.md](SECURITY.md) for deployment security.

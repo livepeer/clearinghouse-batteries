@@ -23,6 +23,7 @@ import (
 	"github.com/livepeer/clearinghouse/internal/store"
 	"github.com/livepeer/clearinghouse/internal/testutil"
 	kgo "github.com/segmentio/kafka-go"
+	"github.com/segmentio/kafka-go/sasl/plain"
 	"github.com/stretchr/testify/require"
 )
 
@@ -151,6 +152,8 @@ func TestCLIStatusEnums(t *testing.T) {
 		{"allocation create", []string{"allocation", "create", "--name", "allocation", "--grant-id", "grant", "--status", "exhausted"}},
 		{"grant transition", []string{"grant", "set-status", "--id", "grant", "--status", "revoked"}},
 		{"allocation transition", []string{"allocation", "set-status", "--id", "allocation", "--status", "closed"}},
+		{"allocation revocation", []string{"allocation", "set-status", "--id", "allocation", "--status", "revoked"}},
+		{"allocation exhaustion", []string{"allocation", "set-status", "--id", "allocation", "--status", "exhausted"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var out bytes.Buffer
@@ -176,14 +179,14 @@ func TestBoaConfigEnvironmentValidationAndHelp(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "configured.db")); !os.IsNotExist(err) {
 		t.Fatal("environment did not override config")
 	}
-	for _, args := range [][]string{{"serve"}, {"grant", "create"}, {"serve", "--enable-auth-webhook"}, {"serve", "--http-bind", "127.0.0.1:8080"}, {"serve", "--enable-auth-webhook", "0.0.0.0:8080", "--webhook-token", "test"}, {"serve", "--enable-kafka", "--kafka-bind", "0.0.0.0:9092"}, {"serve", "--enable-onchain-listener"}} {
+	for _, args := range [][]string{{"serve"}, {"grant", "create"}, {"serve", "--enable-auth-webhook"}, {"serve", "--http-bind", "127.0.0.1:8080"}, {"serve", "--enable-auth-webhook", "0.0.0.0:8080", "--creds-file", "creds.json"}, {"serve", "--enable-kafka", "--kafka-bind", "0.0.0.0:9092"}, {"serve", "--enable-onchain-listener"}} {
 		var out bytes.Buffer
 		if err := Execute(context.Background(), args, &out, &out); err == nil {
 			t.Fatalf("validation allowed %v", args)
 		}
 	}
 	help := cli(t, "serve", "--help")
-	for _, want := range []string{"--enable-auth-webhook string", "--unsafe-http-bind", "CLEARINGHOUSE_UNSAFE_HTTP_BIND", "--enable-kafka", "--enable-onchain-listener", "Run on-chain RPC listener", "--ticket-broker", "--start-block", "--config-file", "Configuration file", "CLEARINGHOUSE_DB_PATH", "CLEARINGHOUSE_TICKET_BROKER", "--webhook-token-file", "CLEARINGHOUSE_WEBHOOK_TOKEN_FILE", "--rpc-url-file", "CLEARINGHOUSE_RPC_URL_FILE"} {
+	for _, want := range []string{"--enable-auth-webhook string", "--unsafe-http-bind", "CLEARINGHOUSE_UNSAFE_HTTP_BIND", "--enable-kafka", "--enable-onchain-listener", "Run on-chain RPC listener", "--ticket-broker", "--start-block", "--config-file", "Configuration file", "CLEARINGHOUSE_DB_PATH", "CLEARINGHOUSE_TICKET_BROKER", "--creds-file", "CLEARINGHOUSE_CREDS_FILE", "--rpc-url-file", "CLEARINGHOUSE_RPC_URL_FILE"} {
 		if !strings.Contains(help, want) {
 			t.Fatalf("help missing %s", want)
 		}
@@ -193,7 +196,7 @@ func TestBoaConfigEnvironmentValidationAndHelp(t *testing.T) {
 			t.Fatalf("direct secret flag exposed in help: %s", line)
 		}
 	}
-	for _, want := range []string{"\nEnvironment Variables:\n", "\n  CLEARINGHOUSE_WEBHOOK_TOKEN  Signer-to-clearinghouse shared token\n", "\n  CLEARINGHOUSE_RPC_URL        On-chain RPC URL\n"} {
+	for _, want := range []string{"\nEnvironment Variables:\n", "CLEARINGHOUSE_RPC_URL", "On-chain RPC URL"} {
 		if !strings.Contains(help, want) {
 			t.Fatalf("secret environment help missing %q", want)
 		}
@@ -283,7 +286,7 @@ func TestOrdinaryCommandsSkipMigrationPreflightButServeRejectsDrift(t *testing.T
 	if err := Execute(context.Background(), []string{"migrate", "status"}, &out, &out); err == nil || !strings.Contains(err.Error(), "unknown migration") {
 		t.Fatal(err)
 	}
-	p := ServeParams{Common: Common{DBPath: f.Path}, EnableAuthWebhook: mustHTTPBind(t, "127.0.0.1:8080"), WebhookToken: "token"}
+	p := ServeParams{Common: Common{DBPath: f.Path}, EnableAuthWebhook: mustHTTPBind(t, "127.0.0.1:8080"), CredsFile: testCredsFile(t)}
 	if err := Serve(context.Background(), p); err == nil || !strings.Contains(err.Error(), "unknown migration") {
 		t.Fatal(err)
 	}
@@ -309,13 +312,14 @@ func TestAllComponentCombinations(t *testing.T) {
 		t.Run(fmt.Sprint(mask), func(t *testing.T) {
 			dir := t.TempDir()
 			start := int64(0)
-			p := ServeParams{Common: Common{DBPath: filepath.Join(dir, "accounts.db")}, EnableKafka: mask&2 != 0, EnableOnchainListener: mask&4 != 0, WebhookToken: "test-token", KafkaBind: testutil.Port(t), KafkaTopic: "events", RPCURL: srv.URL, ChainID: "42161", TicketBroker: testutil.Contract, SignerAddresses: []string{testutil.Sender}, StartBlock: &start, Confirmations: 0, BlockBatchSize: 10, ReorgLookback: 4, PollInterval: 10 * time.Millisecond}
+			p := ServeParams{Common: Common{DBPath: filepath.Join(dir, "accounts.db")}, EnableKafka: mask&2 != 0, EnableOnchainListener: mask&4 != 0, CredsFile: testCredsFile(t), KafkaBind: testutil.Port(t), KafkaTopic: "events", RPCURL: srv.URL, ChainID: "42161", TicketBroker: testutil.Contract, SignerAddresses: []string{testutil.Sender}, StartBlock: &start, Confirmations: 0, BlockBatchSize: 10, ReorgLookback: 4, PollInterval: 10 * time.Millisecond}
 			if mask&1 != 0 {
 				p.EnableAuthWebhook = mustHTTPBind(t, testutil.Port(t))
 			}
 			p.EnableAccounting = mask&8 != 0
 			producerAddr := p.KafkaBind
 			if p.EnableAccounting && !p.EnableKafka {
+				p.CredsFile = testHTTPCredsFile(t)
 				broker, err := kafka.OpenBroker(context.Background(), testutil.Port(t), p.KafkaTopic, filepath.Join(dir, "external"), nil)
 				require.NoError(t, err)
 				brokerCtx, stop := context.WithCancel(context.Background())
@@ -365,7 +369,8 @@ func TestAllComponentCombinations(t *testing.T) {
 					}
 				}
 				if p.EnableKafka {
-					conn, err := kgo.DialContext(ctx, "tcp", p.KafkaBind)
+					reader := &kgo.Dialer{SASLMechanism: plain.Mechanism{Username: "accounting", Password: "read-secret"}}
+					conn, err := reader.DialContext(ctx, "tcp", p.KafkaBind)
 					if err != nil {
 						return false
 					}
@@ -379,7 +384,11 @@ func TestAllComponentCombinations(t *testing.T) {
 				return true
 			})
 			if p.EnableAccounting {
-				w := kgo.NewWriter(kgo.WriterConfig{Brokers: []string{producerAddr}, Topic: p.KafkaTopic, BatchTimeout: time.Millisecond})
+				writerConfig := kgo.WriterConfig{Brokers: []string{producerAddr}, Topic: p.KafkaTopic, BatchTimeout: time.Millisecond}
+				if p.EnableKafka {
+					writerConfig.Dialer = &kgo.Dialer{SASLMechanism: plain.Mechanism{Username: "producer", Password: "write-secret"}}
+				}
+				w := kgo.NewWriter(writerConfig)
 				writeCtx, stop := context.WithTimeout(ctx, 5*time.Second)
 				require.NoError(t, w.WriteMessages(writeCtx, kgo.Message{Value: []byte(`{"id":"startup","type":"other","data":{}}`)}))
 				stop()
@@ -426,11 +435,10 @@ func TestServeFromJSONConfig(t *testing.T) {
 	dir := t.TempDir()
 	bind := testutil.Port(t)
 	path := filepath.Join(dir, "serve.json")
-	tokenPath := filepath.Join(dir, "webhook-token")
-	require.NoError(t, os.WriteFile(tokenPath, []byte("fixture-token"), 0600))
+	credsPath := testCredsFile(t)
 	_, port, err := net.SplitHostPort(bind)
 	require.NoError(t, err)
-	data, err := json.Marshal(map[string]any{"DBPath": filepath.Join(dir, "config-only.db"), "EnableAuthWebhook": ":" + port, "WebhookTokenFile": tokenPath})
+	data, err := json.Marshal(map[string]any{"DBPath": filepath.Join(dir, "config-only.db"), "EnableAuthWebhook": ":" + port, "CredsFile": credsPath})
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(path, data, 0600))
 	ctx, cancel := context.WithCancel(context.Background())

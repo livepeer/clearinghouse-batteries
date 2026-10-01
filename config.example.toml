@@ -8,21 +8,23 @@ EnableKafka = true
 EnableAccounting = true
 EnableOnchainListener = false
 
-# Set CLEARINGHOUSE_WEBHOOK_TOKEN in the environment when the webhook is enabled,
-# or point at a mounted secret file.
-# WebhookTokenFile = "/run/secrets/clearinghouse-webhook-token"
+# Required when the webhook, management API, or embedded Kafka is enabled.
+CredsFile = "/run/secrets/clearinghouse-creds.toml"
 # Non-loopback and wildcard HTTP binds additionally require UnsafeHTTPBind = true.
 # UnsafeHTTPBind = true
+# Run the HTTP listeners behind a terminating TLS proxy.
 
-# The embedded Kafka broker should listen only on a trusted loopback or private network.
+# Run a terminating TLS TCP proxy in front of the embedded broker.
+# Producers connect to the proxy's TLS endpoint; accounting connects locally.
 KafkaBind = "127.0.0.1:9092"
 KafkaTopic = "livepeer-signing"
-# Optional JSON secret with distinct read and write credentials. The broker
-# accepts both SASL/PLAIN and SASL/SCRAM-SHA-512 when this is set.
-# KafkaAuthFile = "/run/secrets/clearinghouse-kafka-auth.json"
 
-# For external plaintext Kafka, set EnableKafka = false, keep EnableAccounting = true,
-# and provide its address. Do not use KafkaBroker with embedded Kafka.
+# The embedded broker accepts SASL/PLAIN and SASL/SCRAM-SHA-512 with separate read
+# and write users from the credentials file. Its connection to the proxy uses
+# plaintext TCP.
+
+# For external Kafka, set EnableKafka = false and provide a private plaintext
+# listener for accounting. Do not combine KafkaBroker with embedded Kafka.
 # KafkaBroker = "broker:9092"
 
 # On-chain listener settings. An RPC URL and SignerAddresses are required when enabled.

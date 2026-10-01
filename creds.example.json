@@ -1,0 +1,26 @@
+{
+  "credentials": [
+    {
+      "id": "operator",
+      "secret": "",
+      "management": {
+        "allow": ["grants.*", "allocations.*", "api_keys.*", "sessions.*", "settlements.read", "usage.read", "ledger.read", "escrow.read"]
+      }
+    },
+    {
+      "id": "signer",
+      "secret": "",
+      "webhook": {"authorize": true}
+    },
+    {
+      "id": "accounting",
+      "secret": "",
+      "kafka": {"username": "accounting", "allow": ["read"], "accounting": true}
+    },
+    {
+      "id": "producer",
+      "secret": "",
+      "kafka": {"username": "producer", "allow": ["write"]}
+    }
+  ]
+}

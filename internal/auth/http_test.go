@@ -6,10 +6,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/livepeer/clearinghouse/internal/serviceauth"
 	"github.com/livepeer/clearinghouse/internal/store"
 	"github.com/livepeer/clearinghouse/internal/testutil"
 	"github.com/stretchr/testify/require"
@@ -17,7 +20,11 @@ import (
 
 func TestSignerWebhook(t *testing.T) {
 	f := testutil.New(t, "100")
-	h := Handler(f.DB, "signer-token")
+	path := filepath.Join(t.TempDir(), "creds.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{"credentials":[{"id":"signer","secret":"signer-token","webhook":{"authorize":true}}]}`), 0600))
+	registry, err := serviceauth.Load(path)
+	require.NoError(t, err)
+	h := Handler(f.DB, registry)
 	ctx := context.Background()
 	call := func(token string, body any) (int, store.Decision) {
 		t.Helper()

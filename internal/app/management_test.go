@@ -15,17 +15,25 @@ import (
 	"testing"
 	"time"
 
+	"github.com/livepeer/clearinghouse/internal/serviceauth"
 	"github.com/livepeer/clearinghouse/internal/store"
 	"github.com/livepeer/clearinghouse/internal/testutil"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 )
 
-func managementRequest(t *testing.T, handler http.Handler, method, path, contentType, body string) *httptest.ResponseRecorder {
+func managementRequest(t *testing.T, handler http.Handler, method, path, contentType, body string, tokens ...string) *httptest.ResponseRecorder {
 	t.Helper()
+	token := testOperatorToken
+	if len(tokens) > 0 {
+		token = tokens[0]
+	}
 	r := httptest.NewRequest(method, path, strings.NewReader(body))
 	if contentType != "" {
 		r.Header.Set("Content-Type", contentType)
+	}
+	if token != "" {
+		r.Header.Set(serviceauth.Header, token)
 	}
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, r)
@@ -55,7 +63,7 @@ func managementForm(t *testing.T, fields map[string]string) (string, string) {
 
 func TestManagementRoutes(t *testing.T) {
 	f := testutil.New(t, "100")
-	handler := managementHandler(context.Background(), f.DB)
+	handler := managementHandler(context.Background(), f.DB, testRegistry(t))
 	grant := managementObject(t, managementRequest(t, handler, "POST", "/v1/grants", "application/json", `{"name":"HTTP grant","amount_eth":"1.000000000000000001","status":"active","metadata":"not JSON: {bad}"}`), 201)
 	grantID := grant["id"].(string)
 	row := managementObject(t, managementRequest(t, handler, "GET", "/v1/grants/"+grantID, "", ""), 200)
@@ -114,9 +122,6 @@ func TestManagementRoutes(t *testing.T) {
 	require.Equal(t, "revoked", managementObject(t, managementRequest(t, handler, "GET", "/v1/allocations/"+allocationID, "", ""), 200)["status"])
 	managementObject(t, managementRequest(t, handler, "PATCH", "/v1/allocations/"+allocationID+"/status", "application/json", `{"status":"active"}`), 409)
 	managementObject(t, managementRequest(t, handler, "GET", "/v1/grants/"+grantID, "", ""), 200)
-	for _, path := range []string{"/livez", "/readyz"} {
-		require.Equal(t, 200, managementRequest(t, handler, "GET", path, "", "").Code)
-	}
 }
 
 func managementArray(t *testing.T, response *httptest.ResponseRecorder, status int) []any {
@@ -129,7 +134,11 @@ func managementArray(t *testing.T, response *httptest.ResponseRecorder, status i
 
 func TestManagementErrors(t *testing.T) {
 	f := testutil.New(t, "100")
-	handler := managementHandler(context.Background(), f.DB)
+	handler := managementHandler(context.Background(), f.DB, testRegistry(t))
+	balancesBefore, err := f.DB.Report(t.Context())
+	require.NoError(t, err)
+	revokedType, revokedBody := managementForm(t, map[string]string{"status": "revoked"})
+	exhaustedType, exhaustedBody := managementForm(t, map[string]string{"status": "exhausted"})
 	for _, tc := range []struct {
 		method, path, contentType, body string
 		status                          int
@@ -140,6 +149,9 @@ func TestManagementErrors(t *testing.T) {
 		{"POST", "/v1/grants", "application/json", `{"name":"bad","amount_eth":"1e2"}`, 400},
 		{"POST", "/v1/grants", "application/json", `{"name":"bad","metadata":{"nested":"object"}}`, 400},
 		{"POST", "/v1/grants", "application/json", `{"name":"bad","amount_eth":1}`, 400},
+		{"POST", "/v1/grants", "application/json", `{"name":"bad","amount_eth":null}`, 400},
+		{"POST", "/v1/grants", "application/json", `null`, 400},
+		{"POST", "/v1/grants", "application/json", `{"name":"bad"} {}`, 400},
 		{"POST", "/v1/grants", "application/json", `{"name":"bad","extra":"value"}`, 400},
 		{"POST", "/v1/grants", "application/json", `{"name":`, 400},
 		{"POST", "/v1/grants", "text/plain", "name=bad", 415},
@@ -147,6 +159,13 @@ func TestManagementErrors(t *testing.T) {
 		{"POST", "/v1/grants", "application/json", `{"name":"bad","starts_at":"tomorrow"}`, 400},
 		{"POST", "/v1/api-keys", "application/json", `{"name":"key"}`, 400},
 		{"PATCH", "/v1/grants/" + f.Grant + "/status", "application/json", `{"status":"invalid"}`, 400},
+		{"PATCH", "/v1/allocations/" + f.Allocation + "/status", "application/json", `{"status":"revoked"}`, 400},
+		{"PATCH", "/v1/allocations/" + f.Allocation + "/status", "application/json", `{"status":"exhausted"}`, 400},
+		{"PATCH", "/v1/allocations/" + f.Allocation + "/status", "application/x-www-form-urlencoded", "status=revoked", 400},
+		{"PATCH", "/v1/allocations/" + f.Allocation + "/status", "application/x-www-form-urlencoded", "status=exhausted", 400},
+		{"PATCH", "/v1/allocations/" + f.Allocation + "/status", revokedType, revokedBody, 400},
+		{"PATCH", "/v1/allocations/" + f.Allocation + "/status", exhaustedType, exhaustedBody, 400},
+		{"POST", "/v1/allocations/" + f.Allocation + "/fund", "application/json", `{"amount_eth":"1"}`, 409},
 		{"POST", "/v1/api-keys/missing/revoke", "", "", 404},
 		{"POST", "/v1/sessions/missing/revoke", "", "", 404},
 		{"POST", "/v1/grants", "application/json", `{"name":"` + strings.Repeat("x", managementBodyLimit) + `"}`, 413},
@@ -154,25 +173,26 @@ func TestManagementErrors(t *testing.T) {
 		response := managementRequest(t, handler, tc.method, tc.path, tc.contentType, tc.body)
 		managementObject(t, response, tc.status)
 	}
-	response := managementRequest(t, handler, "POST", "/v1/allocations/"+f.Allocation+"/fund", "application/json", `{"amount_eth":"1"}`)
-	managementObject(t, response, 409)
+	balancesAfter, err := f.DB.Report(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, balancesBefore, balancesAfter)
+	decision, err := f.DB.Authorize(t.Context(), f.Request)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, decision.Status)
 	require.Equal(t, 405, managementRequest(t, handler, "DELETE", "/v1/grants/"+f.Grant, "", "").Code)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	require.Equal(t, 503, managementRequest(t, managementHandler(ctx, f.DB), "GET", "/readyz", "", "").Code)
 }
 
 func TestManagementBindValidation(t *testing.T) {
 	for _, address := range []string{":8081", "127.0.0.2:8081", "[::1]:8081"} {
-		require.NoError(t, (ServeParams{EnableManagementAPI: mustHTTPBind(t, address)}).Validate())
+		require.NoError(t, (ServeParams{EnableManagementAPI: mustHTTPBind(t, address), CredsFile: "creds.json"}).Validate())
 	}
 	for _, address := range []string{"0.0.0.0:8081", "[::]:8081", "10.0.0.1:8081"} {
-		p := ServeParams{EnableManagementAPI: mustHTTPBind(t, address)}
+		p := ServeParams{EnableManagementAPI: mustHTTPBind(t, address), CredsFile: "creds.json"}
 		require.ErrorContains(t, p.Validate(), "--unsafe-http-bind")
 		p.UnsafeHTTPBind = true
 		require.NoError(t, p.Validate())
 	}
-	p := ServeParams{EnableManagementAPI: mustHTTPBind(t, ":8081"), EnableAuthWebhook: mustHTTPBind(t, "[::1]:8081"), WebhookToken: "token"}
+	p := ServeParams{EnableManagementAPI: mustHTTPBind(t, ":8081"), EnableAuthWebhook: mustHTTPBind(t, "[::1]:8081"), CredsFile: "creds.json"}
 	require.ErrorContains(t, p.Validate(), "separate TCP ports")
 	p.EnableAuthWebhook = mustHTTPBind(t, ":8080")
 	require.NoError(t, p.Validate())
@@ -182,14 +202,13 @@ func TestManagementServerStartup(t *testing.T) {
 	for _, combined := range []bool{false, true} {
 		t.Run(fmt.Sprint(combined), func(t *testing.T) {
 			managementBind := testutil.Port(t)
-			p := ServeParams{Common: Common{DBPath: filepath.Join(t.TempDir(), "management.db")}, EnableManagementAPI: mustHTTPBind(t, managementBind)}
+			p := ServeParams{Common: Common{DBPath: filepath.Join(t.TempDir(), "management.db")}, EnableManagementAPI: mustHTTPBind(t, managementBind), CredsFile: testCredsFile(t)}
 			if combined {
 				webhookBind := testutil.Port(t)
 				for webhookBind == managementBind {
 					webhookBind = testutil.Port(t)
 				}
 				p.EnableAuthWebhook = mustHTTPBind(t, webhookBind)
-				p.WebhookToken = "test-token"
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan error, 1)
@@ -213,7 +232,11 @@ func TestManagementServerStartup(t *testing.T) {
 				response.Body.Close()
 				return response.StatusCode == 200
 			})
-			response, err := client.Post(base+"/v1/grants", "application/json", strings.NewReader(`{"name":"over HTTP","amount_eth":"1"}`))
+			request, err := http.NewRequest("POST", base+"/v1/grants", strings.NewReader(`{"name":"over HTTP","amount_eth":"1"}`))
+			require.NoError(t, err)
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Livepeer-Clearinghouse-Token", testOperatorToken)
+			response, err := client.Do(request)
 			require.NoError(t, err)
 			response.Body.Close()
 			require.Equal(t, 201, response.StatusCode)

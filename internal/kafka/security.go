@@ -6,43 +6,46 @@ import (
 	"net"
 	"time"
 
+	"github.com/j0sh/minikafka"
+	"github.com/livepeer/clearinghouse/internal/serviceauth"
 	kgo "github.com/segmentio/kafka-go"
 	"github.com/segmentio/kafka-go/sasl/scram"
 )
 
-// Credential identifies one Kafka client. The embedded broker grants Read and
-// Write access independently; the accounting listener uses Read.
-type Credential struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
+func brokerConfig(topic string, credentials []serviceauth.KafkaCredential) (*minikafka.SASLConfig, *minikafka.AuthorizationConfig) {
+	users := make(map[string]string, len(credentials))
+	grants := make([]minikafka.TopicGrant, 0, len(credentials))
+	for _, user := range credentials {
+		users[user.Username] = user.Password
+		if user.Read {
+			grants = append(grants, minikafka.TopicGrant{User: user.Username, Topic: topic, Action: minikafka.TopicRead})
+		}
+		if user.Write {
+			grants = append(grants, minikafka.TopicGrant{User: user.Username, Topic: topic, Action: minikafka.TopicWrite})
+		}
+	}
+	return &minikafka.SASLConfig{Mechanisms: []minikafka.SASLMechanism{minikafka.SASLPlain, minikafka.SASLSCRAMSHA512}, Users: users}, &minikafka.AuthorizationConfig{Grants: grants}
 }
 
-type BrokerAccess struct {
-	Read  Credential `json:"read"`
-	Write Credential `json:"write"`
-}
-
-// NewDialer uses SCRAM-SHA-512 for the accounting reader. The embedded broker
-// also accepts PLAIN for independently configured writer clients.
-func NewDialer(credential *Credential) (*kgo.Dialer, error) {
+// NewDialer uses SCRAM-SHA-512 for accounting.
+func NewDialer(credential *serviceauth.KafkaCredential) (*kgo.Dialer, error) {
 	if credential == nil {
 		return nil, nil
 	}
 	if credential.Username == "" || credential.Password == "" {
-		return nil, errors.New("Kafka read username and password are required")
+		return nil, errors.New("Kafka accounting username and password are required")
 	}
 	mechanism, err := scram.Mechanism(scram.SHA512, credential.Username, credential.Password)
 	if err != nil {
-		return nil, errors.New("invalid Kafka read credentials")
+		return nil, errors.New("invalid Kafka accounting credentials")
 	}
 	auth := kgo.Dialer{SASLMechanism: mechanism}
 	return &kgo.Dialer{Timeout: 10 * time.Second, DialFunc: func(ctx context.Context, network, address string) (net.Conn, error) {
 		conn, err := (&net.Dialer{}).DialContext(ctx, network, address)
 		if err != nil {
-			return conn, err
+			return nil, err
 		}
-		// Bound SASL as well as TCP, then detach cancellation before reuse.
-		stop := context.AfterFunc(ctx, func() { conn.Close() })
+		stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 		d := auth
 		d.DialFunc = func(context.Context, string, string) (net.Conn, error) { return conn, nil }
 		_, err = d.DialContext(ctx, network, address)

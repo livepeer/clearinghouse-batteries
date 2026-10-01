@@ -1,34 +1,24 @@
 package auth
 
 import (
-	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/json"
-	"io"
+	jsonv2 "encoding/json/v2"
 	"log/slog"
 	"net/http"
 
+	"github.com/livepeer/clearinghouse/internal/serviceauth"
 	"github.com/livepeer/clearinghouse/internal/store"
 )
 
-func Handler(db *store.Store, token string) http.Handler {
-	expected := sha256.Sum256([]byte(token))
+func Handler(db *store.Store, registry *serviceauth.Registry) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		provided := sha256.Sum256([]byte(r.Header.Get("Livepeer-Clearinghouse-Token")))
-		if token == "" || subtle.ConstantTimeCompare(expected[:], provided[:]) != 1 {
-			http.Error(w, "invalid clearinghouse token", 401)
+		if !registry.Require(w, r, "webhook", "authorize") {
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 		var body store.AuthRequest
-		dec := json.NewDecoder(r.Body)
-		if err := dec.Decode(&body); err != nil {
+		if err := jsonv2.UnmarshalRead(r.Body, &body, json.DefaultOptionsV1()); err != nil {
 			http.Error(w, "invalid webhook body", 400)
-			return
-		}
-		var extra any
-		if dec.Decode(&extra) != io.EOF {
-			http.Error(w, "expected one JSON object", 400)
 			return
 		}
 		if body.State == nil || body.State.StateID == "" || len(body.State.StateID) > 256 || len(body.State.App) > 4096 || len(body.State.AuthID) > 256 {

@@ -20,6 +20,7 @@ import (
 	"github.com/livepeer/clearinghouse/internal/auth"
 	"github.com/livepeer/clearinghouse/internal/chain"
 	"github.com/livepeer/clearinghouse/internal/kafka"
+	"github.com/livepeer/clearinghouse/internal/serviceauth"
 	"github.com/livepeer/clearinghouse/internal/store"
 )
 
@@ -61,11 +62,9 @@ type ServeParams struct {
 	EnableAccounting      bool          `optional:"true" descr:"Run accounting service"`
 	KafkaBroker           string        `optional:"true" descr:"External Kafka broker address (host:port)"`
 	EnableOnchainListener bool          `optional:"true" descr:"Run on-chain RPC listener"`
-	WebhookToken          string        `optional:"true" secret:"true" descr:"Signer-to-clearinghouse shared token"`
-	WebhookTokenFile      string        `secretfor:"WebhookToken" descr:"File containing the signer-to-clearinghouse shared token"`
+	CredsFile             string        `name:"creds-file" optional:"true" file:"true" descr:"JSON or TOML service credential registry"`
 	KafkaBind             string        `default:"127.0.0.1:9092" descr:"Embedded broker IP:port (loopback or private)"`
 	KafkaTopic            string        `default:"livepeer-signing" descr:"Kafka topic for issued tickets"`
-	KafkaAuthFile         string        `name:"kafka-auth-file" optional:"true" file:"true" descr:"JSON file with Kafka read and write users"`
 	RPCURL                string        `name:"rpc-url" optional:"true" secret:"true" descr:"On-chain RPC URL"`
 	RPCURLFile            string        `name:"rpc-url-file" secretfor:"RPCURL" descr:"File containing the on-chain RPC URL"`
 	ChainID               string        `name:"chain-id" optional:"true" descr:"Optional assertion for the RPC chain ID"`
@@ -109,8 +108,8 @@ func (p ServeParams) Validate() error {
 			return fmt.Errorf("invalid Kafka broker address %q: expected host:port", p.KafkaBroker)
 		}
 	}
-	if p.KafkaAuthFile != "" && !p.EnableKafka && !p.EnableAccounting {
-		return errors.New("--kafka-auth-file requires --enable-kafka or --enable-accounting")
+	if (webhookEnabled || managementEnabled || p.EnableKafka) && p.CredsFile == "" {
+		return errors.New("--creds-file is required for management, webhook, or embedded Kafka")
 	}
 	if p.EnableKafka || p.EnableAccounting {
 		if !regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$`).MatchString(p.KafkaTopic) {
@@ -120,9 +119,6 @@ func (p ServeParams) Validate() error {
 	if webhookEnabled {
 		if !p.EnableAuthWebhook.Addr().IsLoopback() && !p.UnsafeHTTPBind {
 			return errors.New("auth webhook bind must be a loopback IP; use --unsafe-http-bind to allow a non-loopback address")
-		}
-		if p.WebhookToken == "" {
-			return errors.New("webhook token required: set CLEARINGHOUSE_WEBHOOK_TOKEN or --webhook-token-file")
 		}
 	}
 	if p.EnableKafka {
@@ -152,7 +148,21 @@ func Serve(ctx context.Context, p ServeParams) error {
 	if err := p.Validate(); err != nil {
 		return err
 	}
-	access, kafkaDialer, err := p.kafkaSecurity()
+	var registry *serviceauth.Registry
+	if p.CredsFile != "" {
+		var err error
+		registry, err = serviceauth.Load(p.CredsFile)
+		if err != nil {
+			return err
+		}
+	}
+	if p.EnableManagementAPI.IsValid() && registry.Count("management") == 0 {
+		return errors.New("management API requires a management credential")
+	}
+	if p.EnableAuthWebhook.IsValid() && registry.Count("webhook") == 0 {
+		return errors.New("auth webhook requires a webhook credential")
+	}
+	access, kafkaDialer, err := p.kafkaSecurity(registry)
 	if err != nil {
 		return err
 	}
@@ -230,12 +240,14 @@ func Serve(ctx context.Context, p ServeParams) error {
 	}
 	if webhookListener != nil {
 		start(func(ctx context.Context) error {
-			return serveHTTP(ctx, webhookListener, authWebhookHandler(ctx, db, p.WebhookToken))
+			return serveHTTP(ctx, webhookListener, authWebhookHandler(ctx, db, registry))
 		})
 		slog.Info("auth webhook listening", "bind", webhookListener.Addr().String())
 	}
 	if managementListener != nil {
-		start(func(ctx context.Context) error { return serveHTTP(ctx, managementListener, managementHandler(ctx, db)) })
+		start(func(ctx context.Context) error {
+			return serveHTTP(ctx, managementListener, managementHandler(ctx, db, registry))
+		})
 		slog.Info("management API listening", "bind", managementListener.Addr().String())
 	}
 	if p.EnableKafka {
@@ -289,9 +301,9 @@ func serveHTTP(ctx context.Context, ln net.Listener, handler http.Handler) error
 	return err
 }
 
-func authWebhookHandler(ctx context.Context, db *store.Store, token string) http.Handler {
+func authWebhookHandler(ctx context.Context, db *store.Store, registry *serviceauth.Registry) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("POST /v1/signer/authorize", auth.Handler(db, token))
+	mux.Handle("POST /v1/signer/authorize", auth.Handler(db, registry))
 	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
 		if ctx.Err() != nil || db.DB.PingContext(r.Context()) != nil {

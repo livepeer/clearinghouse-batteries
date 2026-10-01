@@ -5,13 +5,14 @@ go 1.27.1
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/ethereum/go-ethereum v1.17.5
-	github.com/j0sh/boa v0.0.3-0.20260919085729-b0af3df7f19b
-	github.com/j0sh/minikafka v0.0.0-20260925052110-eab095b45ac3
+	github.com/j0sh/boa v0.0.3-0.20260926065355-ae47ed4e0e35
+	github.com/j0sh/minikafka v0.0.0-20260926062644-e1e6f1f8aae9
 	github.com/mattn/go-sqlite3 v1.14.52
 	github.com/segmentio/kafka-go v0.4.47
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
-	golang.org/x/sync v0.19.0
+	github.com/xdg-go/stringprep v1.0.4
+	golang.org/x/sync v0.21.0
 )
 
 require (
@@ -33,7 +34,7 @@ require (
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/holiman/uint256 v1.3.2 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/klauspost/compress v1.18.6 // indirect
+	github.com/klauspost/compress v1.18.7 // indirect
 	github.com/pierrec/lz4/v4 v4.1.26 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/shirou/gopsutil v3.21.4-0.20210419000835-c7a38de76ee5+incompatible // indirect
@@ -44,12 +45,11 @@ require (
 	github.com/twmb/franz-go/pkg/kmsg v1.13.1 // indirect
 	github.com/xdg-go/pbkdf2 v1.0.0 // indirect
 	github.com/xdg-go/scram v1.2.0 // indirect
-	github.com/xdg-go/stringprep v1.0.4 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel v1.41.0 // indirect
 	go.opentelemetry.io/otel/metric v1.41.0 // indirect
 	go.opentelemetry.io/otel/trace v1.41.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect
-	golang.org/x/text v0.34.0 // indirect
+	golang.org/x/text v0.39.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

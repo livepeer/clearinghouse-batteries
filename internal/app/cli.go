@@ -91,7 +91,7 @@ func Root(out, errOut io.Writer) *cobra.Command {
 	for _, kind := range []string{"grant", "allocation"} {
 		initial, statuses := "draft,active,paused", "draft,active,paused,closed"
 		if kind == "allocation" {
-			initial, statuses = "active,paused", "active,paused,exhausted,revoked"
+			initial, statuses = "active,paused", "active,paused"
 		}
 		group := &cobra.Command{Use: kind, Short: "Manage " + kind + "s"}
 		group.AddCommand(command[CreateParams]("create", "Create and fund a "+kind, func(p *CreateParams, c *cobra.Command) error {

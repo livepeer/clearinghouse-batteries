@@ -1,0 +1,29 @@
+# Replace every empty secret with a distinct random value before starting.
+# Remove entries for clients or services you do not need.
+# For external Kafka, configure matching users and topic permissions on the broker.
+[[credentials]]
+id = "operator"
+secret = ""
+[credentials.management]
+allow = ["grants.*", "allocations.*", "api_keys.*", "sessions.*", "settlements.read", "usage.read", "ledger.read", "escrow.read"]
+
+[[credentials]]
+id = "signer"
+secret = ""
+[credentials.webhook]
+authorize = true
+
+[[credentials]]
+id = "accounting"
+secret = ""
+[credentials.kafka]
+username = "accounting"
+allow = ["read"]
+accounting = true
+
+[[credentials]]
+id = "producer"
+secret = ""
+[credentials.kafka]
+username = "producer"
+allow = ["write"]

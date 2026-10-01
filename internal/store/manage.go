@@ -247,7 +247,7 @@ func (s *Store) SetStatus(ctx context.Context, kind, id, status string) error {
 			_, err := tx.ExecContext(ctx, `UPDATE grants SET status=? WHERE id=?`, status, id)
 			return err
 		case "allocation":
-			if !oneOf(status, "active", "paused", "exhausted", "revoked") {
+			if !oneOf(status, "active", "paused", "revoked") {
 				return invalidInput("invalid allocation status")
 			}
 			var old, grant, allocated, currency string

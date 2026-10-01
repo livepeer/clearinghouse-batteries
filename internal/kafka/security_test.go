@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/livepeer/clearinghouse/internal/serviceauth"
 	"github.com/livepeer/clearinghouse/internal/store"
 	"github.com/livepeer/clearinghouse/internal/testutil"
 	kgo "github.com/segmentio/kafka-go"
@@ -17,13 +18,12 @@ func TestBrokerReadWriteUsers(t *testing.T) {
 	f := testutil.New(t, "100")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	access := &BrokerAccess{
-		Read:  Credential{Username: "accounting", Password: "read-secret"},
-		Write: Credential{Username: "producer", Password: "write-secret"},
-	}
+	read := serviceauth.KafkaCredential{Username: "accounting", Password: "read-secret", Read: true}
+	write := serviceauth.KafkaCredential{Username: "pro\u00adducer", Password: "write-secret", Write: true}
+	access := []serviceauth.KafkaCredential{read, write}
 	broker, err := OpenBroker(ctx, "127.0.0.1:0", "events", t.TempDir(), access)
 	require.NoError(t, err)
-	readerDialer, err := NewDialer(&access.Read)
+	readerDialer, err := NewDialer(&read)
 	require.NoError(t, err)
 	listener := &Listener{DB: f.DB, Broker: broker.Addr(), Topic: "events", Dialer: readerDialer}
 	done := make(chan error, 2)
@@ -43,8 +43,8 @@ func TestBrokerReadWriteUsers(t *testing.T) {
 	})
 	testutil.Eventually(t, func() bool { return listener.Ready.Load() })
 
-	plainWriter := &kgo.Dialer{SASLMechanism: plain.Mechanism{Username: access.Write.Username, Password: access.Write.Password}}
-	scramWriter, err := NewDialer(&access.Write)
+	plainWriter := &kgo.Dialer{SASLMechanism: plain.Mechanism{Username: write.Username, Password: write.Password}}
+	scramWriter, err := NewDialer(&write)
 	require.NoError(t, err)
 	for i, dialer := range []*kgo.Dialer{plainWriter, scramWriter} {
 		conn, err := dialer.DialLeader(ctx, "tcp", broker.Addr(), "events", 0)
@@ -78,7 +78,7 @@ func TestBrokerReadWriteUsers(t *testing.T) {
 	require.ErrorContains(t, err, "Topic Authorization Failed")
 	require.NoError(t, writeConn.Close())
 
-	badDialer, err := NewDialer(&Credential{Username: access.Read.Username, Password: "wrong"})
+	badDialer, err := NewDialer(&serviceauth.KafkaCredential{Username: read.Username, Password: "wrong"})
 	require.NoError(t, err)
 	_, err = badDialer.DialContext(ctx, "tcp", broker.Addr())
 	require.Error(t, err)
@@ -101,7 +101,7 @@ func TestSASLDialCancellation(t *testing.T) {
 				conn, _ := ln.Accept()
 				accepted <- conn
 			}()
-			dialer, err := NewDialer(&Credential{Username: "reader", Password: "secret"})
+			dialer, err := NewDialer(&serviceauth.KafkaCredential{Username: "reader", Password: "secret"})
 			require.NoError(t, err)
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()

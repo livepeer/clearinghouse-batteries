@@ -28,6 +28,7 @@ import (
 	"github.com/livepeer/clearinghouse/internal/store"
 	"github.com/livepeer/clearinghouse/internal/testutil"
 	kgo "github.com/segmentio/kafka-go"
+	"github.com/segmentio/kafka-go/sasl/plain"
 )
 
 const (
@@ -35,7 +36,7 @@ const (
 	benchmarkWarmupEvents    = 1
 	benchmarkAllocationWei   = "1000000000000000000000000000000"
 	benchmarkTopic           = "benchmark-signing"
-	benchmarkWebhookToken    = "benchmark-webhook-token"
+	benchmarkWebhookToken    = testWebhookToken
 )
 
 var benchmarkContractABI = func() abi.ABI {
@@ -189,7 +190,7 @@ func benchmarkSteadyState(b *testing.B, layout benchmarkLayout, workers int) {
 		EnableKafka:           true,
 		EnableAccounting:      true,
 		EnableOnchainListener: true,
-		WebhookToken:          benchmarkWebhookToken,
+		CredsFile:             testCredsFile(b),
 		KafkaBind:             kafkaAddr,
 		KafkaTopic:            benchmarkTopic,
 		RPCURL:                rpcHTTP.URL,
@@ -260,6 +261,7 @@ func benchmarkSteadyState(b *testing.B, layout benchmarkLayout, workers int) {
 		Topic:        benchmarkTopic,
 		Balancer:     kgo.CRC32Balancer{},
 		BatchTimeout: time.Millisecond,
+		Dialer:       &kgo.Dialer{SASLMechanism: plain.Mechanism{Username: "producer", Password: "write-secret"}},
 	})
 	writerClosed := false
 	defer func() {

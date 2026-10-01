@@ -3,54 +3,42 @@ package app
 import (
 	"context"
 	"net/http"
-	"net/http/httptest"
 	"path/filepath"
 	"testing"
 
+	"github.com/livepeer/clearinghouse/internal/serviceauth"
 	"github.com/livepeer/clearinghouse/internal/store"
 	"github.com/stretchr/testify/require"
 )
 
-func TestAuthWebhookHealthRoutes(t *testing.T) {
-	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "health.db"), true)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
-
-	handler := authWebhookHandler(context.Background(), db, "test-token")
-	for _, tc := range []struct {
-		path string
-		want int
-	}{{"/livez", http.StatusOK}, {"/readyz", http.StatusOK}, {"/healthz", http.StatusNotFound}} {
-		t.Run(tc.path, func(t *testing.T) {
-			response := httptest.NewRecorder()
-			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, tc.path, nil))
-			require.Equal(t, tc.want, response.Code)
+func TestHTTPHealthRoutes(t *testing.T) {
+	for _, listener := range []struct {
+		name    string
+		handler func(context.Context, *store.Store, *serviceauth.Registry) http.Handler
+	}{{"webhook", authWebhookHandler}, {"management", managementHandler}} {
+		t.Run(listener.name, func(t *testing.T) {
+			db, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "health.db"), true)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, db.Close()) })
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			handler := listener.handler(ctx, db, nil)
+			check := func(path string, want int) {
+				t.Helper()
+				response := managementRequest(t, handler, "GET", path, "", "", "")
+				require.Equal(t, want, response.Code, path)
+				if want == http.StatusServiceUnavailable {
+					require.Equal(t, "not ready\n", response.Body.String())
+				}
+			}
+			check("/livez", http.StatusOK)
+			check("/readyz", http.StatusOK)
+			check("/healthz", http.StatusNotFound)
+			cancel()
+			check("/readyz", http.StatusServiceUnavailable)
+			require.NoError(t, db.Close())
+			handler = listener.handler(t.Context(), db, nil)
+			check("/readyz", http.StatusServiceUnavailable)
 		})
 	}
-}
-
-func TestAuthWebhookReadinessFailures(t *testing.T) {
-	t.Run("shutdown", func(t *testing.T) {
-		db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "shutdown.db"), true)
-		require.NoError(t, err)
-		t.Cleanup(func() { require.NoError(t, db.Close()) })
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-
-		response := httptest.NewRecorder()
-		authWebhookHandler(ctx, db, "test-token").ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/readyz", nil))
-		require.Equal(t, http.StatusServiceUnavailable, response.Code)
-		require.Equal(t, "not ready\n", response.Body.String())
-	})
-
-	t.Run("database unavailable", func(t *testing.T) {
-		db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "closed.db"), true)
-		require.NoError(t, err)
-		require.NoError(t, db.Close())
-
-		response := httptest.NewRecorder()
-		authWebhookHandler(context.Background(), db, "test-token").ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/readyz", nil))
-		require.Equal(t, http.StatusServiceUnavailable, response.Code)
-		require.Equal(t, "not ready\n", response.Body.String())
-	})
 }

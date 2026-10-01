@@ -393,6 +393,10 @@ func TestRevocationReturnsOnlyUnspentAndLateChargeIsRecorded(t *testing.T) {
 	require.NoError(t, f.DB.Ingest(ctx, "test", 0, 0, f.Event(t, "one", "40", testutil.PM)))
 	require.NoError(t, f.DB.SetStatus(ctx, "allocation", f.Allocation, "revoked"))
 	require.NoError(t, f.DB.SetStatus(ctx, "allocation", f.Allocation, "revoked"))
+	rows, err := f.DB.List(ctx, "allocation", f.Allocation)
+	require.NoError(t, err)
+	require.Equal(t, "revoked", rows[0]["status"])
+	require.Equal(t, "40", rows[0]["allocated_units"])
 	require.NoError(t, f.DB.Ingest(ctx, "test", 0, 1, f.Event(t, "late", "20", testutil.PM)))
 	bal, err := store.Balance(ctx, f.DB.DB, "allocation_available", f.Allocation)
 	require.NoError(t, err)
@@ -452,4 +456,43 @@ func TestConcurrentSpendsNeverLoseCharges(t *testing.T) {
 		t.Fatal(b)
 	}
 	assertBalanced(t, f.DB)
+}
+
+func TestAllocationExhaustionIsAutomatic(t *testing.T) {
+	for _, pause := range []bool{false, true} {
+		t.Run(fmt.Sprint("pause=", pause), func(t *testing.T) {
+			f := testutil.New(t, "100")
+			ctx := t.Context()
+			status := func(want string, authStatus int) {
+				t.Helper()
+				var got string
+				require.NoError(t, f.DB.DB.QueryRow(`SELECT status FROM grant_allocations WHERE id=?`, f.Allocation).Scan(&got))
+				require.Equal(t, want, got)
+				decision, err := f.DB.Authorize(ctx, f.Request)
+				require.NoError(t, err)
+				require.Equal(t, authStatus, decision.Status)
+			}
+			require.ErrorIs(t, f.DB.SetStatus(ctx, "allocation", f.Allocation, "exhausted"), store.ErrInvalidManagementInput)
+			status("active", http.StatusOK)
+			balance, err := store.Balance(ctx, f.DB.DB, "allocation_available", f.Allocation)
+			require.NoError(t, err)
+			require.Equal(t, "100", balance.String())
+
+			require.NoError(t, f.DB.Ingest(ctx, "exhaustion", 0, 0, f.Event(t, "spent", "100", testutil.PM)))
+			status("exhausted", http.StatusPaymentRequired)
+			require.ErrorIs(t, f.DB.SetStatus(ctx, "allocation", f.Allocation, "exhausted"), store.ErrInvalidManagementInput)
+			require.ErrorIs(t, f.DB.SetStatus(ctx, "allocation", f.Allocation, "active"), store.ErrManagementConflict)
+			if pause {
+				require.NoError(t, f.DB.SetStatus(ctx, "allocation", f.Allocation, "paused"))
+				status("paused", http.StatusForbidden)
+			}
+			require.NoError(t, f.DB.Fund(ctx, "grant", f.Grant, "25"))
+			require.NoError(t, f.DB.Fund(ctx, "allocation", f.Allocation, "25"))
+			if pause {
+				status("paused", http.StatusForbidden)
+				require.NoError(t, f.DB.SetStatus(ctx, "allocation", f.Allocation, "active"))
+			}
+			status("active", http.StatusOK)
+		})
+	}
 }
