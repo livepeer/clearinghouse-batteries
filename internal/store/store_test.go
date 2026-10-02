@@ -90,10 +90,11 @@ func TestMigrationsConstraintsAndRoundTrip(t *testing.T) {
 	require.NoError(t, migrations.Up(ctx, f.DB.DB))
 	list, err := migrations.List(ctx, f.DB.DB)
 	require.NoError(t, err)
-	if len(list) != 1 || !list[0].Applied {
-		t.Fatal(list)
+	require.NotEmpty(t, list)
+	for _, item := range list {
+		require.True(t, item.Applied)
+		require.NoError(t, migrations.Down(ctx, f.DB.DB))
 	}
-	require.NoError(t, migrations.Down(ctx, f.DB.DB))
 	require.NoError(t, migrations.Up(ctx, f.DB.DB))
 	var count int
 	require.NoError(t, f.DB.DB.QueryRow(`SELECT count(*) FROM grants`).Scan(&count))

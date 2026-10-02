@@ -8,6 +8,7 @@ import (
 	"embed"
 	"encoding/hex"
 	"fmt"
+	"io/fs"
 	"regexp"
 	"sort"
 	"strconv"
@@ -15,7 +16,9 @@ import (
 )
 
 //go:embed *.sql
-var files embed.FS
+var embeddedFiles embed.FS
+
+var files fs.FS = embeddedFiles
 
 var migrationName = regexp.MustCompile(`^([0-9]{3,})_[a-z0-9_]+\.sql$`)
 
@@ -43,7 +46,7 @@ func initTable(ctx context.Context, db *sql.DB) error {
 }
 
 func catalog() ([]migration, error) {
-	entries, err := files.ReadDir(".")
+	entries, err := fs.ReadDir(files, ".")
 	if err != nil {
 		return nil, err
 	}
@@ -60,7 +63,7 @@ func catalog() ([]migration, error) {
 		if err != nil || version <= 0 {
 			return nil, fmt.Errorf("invalid migration version in %s", entry.Name())
 		}
-		contents, err := files.ReadFile(entry.Name())
+		contents, err := fs.ReadFile(files, entry.Name())
 		if err != nil {
 			return nil, err
 		}

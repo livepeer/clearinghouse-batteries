@@ -21,8 +21,12 @@
 - Keep secrets out of source control, command-line arguments, container images,
   and ordinary configuration files. Do not log `Livepeer-Clearinghouse-Token`,
   `Authorization`, or API-key creation responses.
-- API-key secrets are shown once. Store them immediately, use a separate key
-  per gateway or deployment, and revoke disclosed keys.
+- Store API-key secrets when returned, use a separate key per gateway or
+  deployment, and revoke disclosed keys. Matching creation retries return the
+  same secret, even after revocation.
+- Idempotency keys are shared within a grant. Any management credential with
+  the required creation permissions can retrieve a saved secret using the same
+  key and request.
 - Management permissions cover all resources of a type. Wildcards include future
   actions; review them before upgrades. After changing credentials or permissions,
   update affected clients or broker users and restart clearinghouse.
@@ -31,6 +35,8 @@
 
 - Use a dedicated unprivileged user, state-directory mode `0700`, and umask `0077`.
   Protect database/WAL files, configuration, logs, and backups.
+- API-key records store hashes. Idempotent creation also saves the full key in
+  the response record, which is included in database backups.
 - Keep SQLite on reliable local storage. Limit management API and CLI access to
   trusted operators; CLI commands modify the database directly.
 - Run one accounting service and one on-chain listener per database. Use a single

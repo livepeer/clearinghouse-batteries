@@ -2,8 +2,10 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"encoding/json/jsontext"
 	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
@@ -102,10 +104,18 @@ func managementHandler(ctx context.Context, db *store.Store, registry *serviceau
 			if err != nil {
 				return nil, badManagementRequest("invalid ends_at: expected RFC3339")
 			}
-			id, err := db.Create(r.Context(), kind, store.Create{
+			p := store.Create{
 				Name: fields["name"], Sponsor: fields["sponsor"], Beneficiary: fields["beneficiary"], GrantID: fields["grant_id"],
 				Amount: amount, Currency: currency, Status: fields["status"], Metadata: fields["metadata"], Starts: starts, Ends: ends,
-			})
+			}
+			if kind == "allocation" {
+				request, err := managementIdempotency(r, fields)
+				if err != nil {
+					return nil, err
+				}
+				return db.CreateAllocationIdempotent(r.Context(), p, request)
+			}
+			id, err := db.Create(r.Context(), kind, p)
 			return map[string]string{"id": id}, err
 		})
 		handle("POST /v1/"+path+"/{id}/fund", path+".fund", http.StatusOK, func(w http.ResponseWriter, r *http.Request) (any, error) {
@@ -117,8 +127,11 @@ func managementHandler(ctx context.Context, db *store.Store, registry *serviceau
 			if err != nil {
 				return nil, badManagementRequest(err.Error())
 			}
-			id := r.PathValue("id")
-			return map[string]string{"id": id}, db.FundCurrency(r.Context(), kind, id, amount, currency)
+			request, err := managementIdempotency(r, fields)
+			if err != nil {
+				return nil, err
+			}
+			return db.FundCurrencyIdempotent(r.Context(), kind, r.PathValue("id"), amount, currency, request)
 		})
 		handle("PATCH /v1/"+path+"/{id}/status", path+".status", http.StatusOK, func(w http.ResponseWriter, r *http.Request) (any, error) {
 			fields, err := managementFields(w, r, "status")
@@ -145,19 +158,21 @@ func managementHandler(ctx context.Context, db *store.Store, registry *serviceau
 		if grant != "" && registry.Check(r, "management", "allocations.create", "allocations.fund") != http.StatusOK {
 			return nil, managementRequestError{http.StatusForbidden, "Forbidden"}
 		}
+		request, err := managementIdempotency(r, fields)
+		if err != nil {
+			return nil, err
+		}
 		if allocation != "" {
 			if usd != "" || eth != "" {
 				return nil, badManagementRequest("amount is only valid with grant_id")
 			}
-			id, key, err := db.CreateKey(r.Context(), allocation, fields["name"])
-			return map[string]string{"allocation_id": allocation, "id": id, "api_key": key}, err
+			return db.CreateKeyIdempotent(r.Context(), allocation, fields["name"], request)
 		}
 		amount, currency, err := inputAmount(usd, eth, false, true)
 		if err != nil {
 			return nil, badManagementRequest(err.Error())
 		}
-		allocation, id, key, err := db.CreateKeyForGrantCurrency(r.Context(), grant, fields["name"], amount, currency)
-		return map[string]string{"allocation_id": allocation, "id": id, "api_key": key}, err
+		return db.CreateKeyForGrantCurrencyIdempotent(r.Context(), grant, fields["name"], amount, currency, request)
 	})
 	for _, resource := range []struct{ path, kind string }{{"allocations", "allocation"}, {"api-keys", "api-key"}, {"sessions", "session"}} {
 		path, kind := resource.path, resource.kind
@@ -179,6 +194,29 @@ func managementHandler(ctx context.Context, db *store.Store, registry *serviceau
 		w.Header().Set("Cache-Control", "no-store")
 		mux.ServeHTTP(w, r)
 	})
+}
+
+func managementIdempotency(r *http.Request, fields map[string]string) (store.Idempotency, error) {
+	values := r.Header.Values("Idempotency-Key")
+	if len(values) == 0 {
+		return store.Idempotency{}, nil
+	}
+	if len(values) != 1 {
+		return store.Idempotency{}, badManagementRequest("expected exactly one Idempotency-Key")
+	}
+	if err := store.ValidateIdempotencyKey(values[0]); err != nil {
+		return store.Idempotency{}, err
+	}
+	// Hash decoded fields without normalizing values or adding defaults. The
+	// route pattern and target distinguish operations sharing a grant namespace.
+	parameters, err := jsonv2.Marshal(struct {
+		Method, Route, Target string
+		Fields                map[string]string
+	}{r.Method, r.Pattern, r.PathValue("id"), fields}, json.DefaultOptionsV1(), jsontext.AllowInvalidUTF8(false))
+	if err != nil {
+		return store.Idempotency{}, badManagementRequest("request fields must be valid UTF-8")
+	}
+	return store.Idempotency{Key: values[0], Fingerprint: sha256.Sum256(parameters)}, nil
 }
 
 func managementFields(w http.ResponseWriter, r *http.Request, allowed ...string) (map[string]string, error) {
@@ -244,6 +282,12 @@ func managementDecodeError(err error) error {
 
 func managementResult(w http.ResponseWriter, status int, result any, err error) {
 	if err == nil {
+		if response, ok := result.(store.ManagementResponse); ok {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(response.Status)
+			_, _ = w.Write(response.Body)
+			return
+		}
 		result, err = displayETH(result)
 	}
 	if err != nil {
