@@ -55,7 +55,7 @@ func managementHandler(ctx context.Context, db *store.Store, registry *serviceau
 	}{
 		{"grants", "grant", true},
 		{"allocations", "allocation", true},
-		{"api-keys", "api-key", false},
+		{"api-keys", "api-key", true},
 		{"sessions", "session", true},
 		{"settlements", "settlement", false},
 		{"usage", "usage", false},
