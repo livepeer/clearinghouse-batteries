@@ -56,6 +56,18 @@ func NewCurrency(t *testing.T, amount, currency string) *Fixture {
 	return f
 }
 
+// ManagementState snapshots resources, ledger data, and saved responses.
+func (f *Fixture) ManagementState(t *testing.T) map[string][]map[string]any {
+	t.Helper()
+	state := map[string][]map[string]any{}
+	for _, table := range []string{"grants", "grant_allocations", "api_keys", "ledger_transactions", "ledger_entries", "account_balances", "management_idempotency"} {
+		rows, err := f.DB.Rows(t.Context(), "SELECT * FROM "+table+" ORDER BY rowid")
+		require.NoError(t, err)
+		state[table] = rows
+	}
+	return state
+}
+
 // AssertBalances independently rebuilds the complete balance map from the ledger.
 // Fixture cleanup runs this across management, usage, settlement and reorg tests.
 func AssertBalances(t *testing.T, db *store.Store) {
