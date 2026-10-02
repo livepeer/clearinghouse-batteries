@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/livepeer/clearinghouse/internal/store"
 	"github.com/livepeer/clearinghouse/internal/testutil"
+	"github.com/livepeer/clearinghouse/internal/units"
 	"github.com/stretchr/testify/require"
 )
 
@@ -82,6 +85,97 @@ func TestUsageCurrencyOutput(t *testing.T) {
 					require.Nil(t, row["currency"])
 				}
 			}
+		})
+	}
+}
+
+func TestAllocationBalanceReads(t *testing.T) {
+	for _, currency := range []string{"usd", "eth"} {
+		t.Run(currency, func(t *testing.T) {
+			f := testutil.NewCurrency(t, "1000000000000000001", currency)
+			t.Setenv("CLEARINGHOUSE_DB_PATH", f.Path)
+			ctx := t.Context()
+			handler := managementHandler(ctx, f.DB, managementRegistry(t, []string{"allocations.read"}))
+			zero, err := f.DB.Create(ctx, "allocation", store.Create{Name: "empty", GrantID: f.Grant, Amount: "0"})
+			require.NoError(t, err)
+
+			check := func(id, allocated, available, spent, status string) {
+				t.Helper()
+				row := managementObject(t, managementRequest(t, handler, "GET", "/v1/allocations/"+id, "", "", "limited-secret"), http.StatusOK)
+				require.Equal(t, id, row["id"])
+				require.Equal(t, f.Grant, row["grant_id"])
+				require.Equal(t, currency, row["currency"])
+				require.Equal(t, status, row["status"])
+				require.Equal(t, allocated, row["allocated_"+currency])
+				require.Equal(t, available, row["available_"+currency])
+				require.Equal(t, spent, row["spent_"+currency])
+				for _, key := range []string{"allocated", "available", "spent"} {
+					require.NotContains(t, row, key+"_units")
+					otherCurrency := "eth"
+					if currency == "eth" {
+						otherCurrency = "usd"
+					}
+					require.NotContains(t, row, key+"_"+otherCurrency)
+				}
+
+				response := managementRequest(t, handler, "GET", "/v1/allocations", "", "", "limited-secret")
+				list := managementArray(t, response, http.StatusOK)
+				require.Len(t, list, 2)
+				var listed map[string]any
+				for _, item := range list {
+					candidate := item.(map[string]any)
+					if candidate["id"] == id {
+						listed = candidate
+					}
+					if candidate["id"] == zero {
+						require.Equal(t, "0", candidate["available_"+currency])
+						require.Equal(t, "0", candidate["spent_"+currency])
+					}
+				}
+				require.Equal(t, row, listed)
+				require.JSONEq(t, response.Body.String(), cli(t, "allocation", "list"))
+				var shown []map[string]any
+				require.NoError(t, json.Unmarshal([]byte(cli(t, "allocation", "show", "--id", id)), &shown))
+				require.Equal(t, []map[string]any{row}, shown)
+			}
+
+			fund := func(amount string) {
+				t.Helper()
+				value, err := units.DecimalToUnits(amount, strings.ToUpper(currency))
+				require.NoError(t, err)
+				require.NoError(t, f.DB.FundCurrency(ctx, "grant", f.Grant, value, currency))
+				require.NoError(t, f.DB.FundCurrency(ctx, "allocation", f.Allocation, value, currency))
+			}
+			var offset int64
+			spend := func(amount string) {
+				t.Helper()
+				value, err := units.DecimalToUnits(amount, strings.ToUpper(currency))
+				require.NoError(t, err)
+				var envelope map[string]any
+				require.NoError(t, json.Unmarshal(f.Event(t, store.ID(), value, testutil.PM), &envelope))
+				envelope["data"].(map[string]any)["computed_fee_usd"] = amount
+				raw, err := json.Marshal(envelope)
+				require.NoError(t, err)
+				require.NoError(t, f.DB.Ingest(ctx, "usage", 0, offset, raw))
+				offset++
+			}
+
+			check(zero, "0", "0", "0", "exhausted")
+			check(f.Allocation, "1.000000000000000001", "1.000000000000000001", "0", "active")
+			fund("0.5")
+			check(f.Allocation, "1.500000000000000001", "1.500000000000000001", "0", "active")
+			spend("0.4")
+			check(f.Allocation, "1.500000000000000001", "1.100000000000000001", "0.4", "active")
+			spend("1.100000000000000001")
+			check(f.Allocation, "1.500000000000000001", "0", "1.500000000000000001", "exhausted")
+			spend("0.25")
+			check(f.Allocation, "1.500000000000000001", "-0.25", "1.750000000000000001", "exhausted")
+			fund("0.75")
+			check(f.Allocation, "2.250000000000000001", "0.5", "1.750000000000000001", "active")
+			require.NoError(t, f.DB.SetStatus(ctx, "allocation", f.Allocation, "revoked"))
+			check(f.Allocation, "1.750000000000000001", "0", "1.750000000000000001", "revoked")
+			spend("0.125")
+			check(f.Allocation, "1.750000000000000001", "-0.125", "1.875000000000000001", "revoked")
 		})
 	}
 }
