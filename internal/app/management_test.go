@@ -124,6 +124,55 @@ func TestManagementRoutes(t *testing.T) {
 	managementObject(t, managementRequest(t, handler, "GET", "/v1/grants/"+grantID, "", ""), 200)
 }
 
+func TestAPIKeyItemRoute(t *testing.T) {
+	f := testutil.New(t, "100")
+	handler := managementHandler(t.Context(), f.DB, testRegistry(t))
+	created := managementObject(t, managementRequest(t, handler, "POST", "/v1/api-keys", "application/json", fmt.Sprintf(`{"allocation_id":%q,"name":"gateway"}`, f.Allocation)), http.StatusCreated)
+	id, secret := created["id"].(string), created["api_key"].(string)
+	path := "/v1/api-keys/" + id
+	var createdAt int64
+	require.NoError(t, f.DB.DB.QueryRow(`SELECT created_at_ms FROM api_keys WHERE id=?`, id).Scan(&createdAt))
+	require.Greater(t, createdAt, int64(0))
+	want := map[string]any{
+		"id": id, "allocation_id": f.Allocation, "name": "gateway", "prefix": "lpg_" + id,
+		"created_at_ms": float64(createdAt), "last_used_at_ms": nil, "revoked_at_ms": nil,
+	}
+	check := func() {
+		t.Helper()
+		response := managementRequest(t, handler, "GET", path, "", "")
+		row := managementObject(t, response, http.StatusOK)
+		require.Equal(t, want, row)
+		require.NotContains(t, row, "api_key")
+		require.NotContains(t, row, "secret_hash")
+		require.NotContains(t, response.Body.String(), secret)
+	}
+	check()
+
+	request := f.Request
+	request.Headers = http.Header{"Authorization": []string{"Bearer " + secret}}
+	state := *f.Request.State
+	state.StateID = "api-key-item"
+	request.State = &state
+	decision, err := f.DB.Authorize(t.Context(), request)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, decision.Status)
+	var lastUsed int64
+	require.NoError(t, f.DB.DB.QueryRow(`SELECT last_used_at_ms FROM api_keys WHERE id=?`, id).Scan(&lastUsed))
+	require.Greater(t, lastUsed, int64(0))
+	want["last_used_at_ms"] = float64(lastUsed)
+	check()
+
+	managementObject(t, managementRequest(t, handler, "POST", path+"/revoke", "", ""), http.StatusOK)
+	var revokedAt int64
+	require.NoError(t, f.DB.DB.QueryRow(`SELECT revoked_at_ms FROM api_keys WHERE id=?`, id).Scan(&revokedAt))
+	require.Greater(t, revokedAt, int64(0))
+	want["revoked_at_ms"] = float64(revokedAt)
+	check()
+
+	missing := managementObject(t, managementRequest(t, handler, "GET", "/v1/api-keys/missing", "", ""), http.StatusNotFound)
+	require.Equal(t, map[string]any{"error": "resource not found"}, missing)
+}
+
 func managementArray(t *testing.T, response *httptest.ResponseRecorder, status int) []any {
 	t.Helper()
 	require.Equal(t, status, response.Code, response.Body.String())
