@@ -100,8 +100,8 @@ func (s *Store) Ingest(ctx context.Context, topic string, partition int, offset 
 		var feeUSD any
 		var usdUnits *big.Int
 		if status == "applied" {
-			var state, app, orch string
-			err := tx.QueryRowContext(ctx, `SELECT s.allocation_id,s.state_id,s.app,s.orchestrator,a.currency FROM payment_sessions s JOIN grant_allocations a ON a.id=s.allocation_id WHERE s.id=?`, ev.AuthID).Scan(&allocation, &state, &app, &orch, &currency)
+			var state, app, paymentType, orch string
+			err := tx.QueryRowContext(ctx, `SELECT s.allocation_id,s.state_id,s.app,s.payment_type,s.orchestrator,a.currency FROM payment_sessions s JOIN grant_allocations a ON a.id=s.allocation_id WHERE s.id=?`, ev.AuthID).Scan(&allocation, &state, &app, &paymentType, &orch, &currency)
 			if errors.Is(err, sql.ErrNoRows) {
 				status, reason = "quarantined", "missing auth_id or unknown payment session"
 			} else if err != nil {
@@ -118,7 +118,7 @@ func (s *Store) Ingest(ctx context.Context, topic string, partition int, offset 
 					}
 				}
 				eventOrch, addrErr := Address(ev.Orchestrator)
-				if ev.SessionID != state || ev.App != app || eventOrch != orch || addrErr != nil {
+				if ev.SessionID != state || ev.App != app || ev.Pipeline != paymentType || eventOrch != orch || addrErr != nil {
 					status, reason = "quarantined", "event does not match session binding"
 				} else if feeErr != nil || ev.NumTickets < 1 || ev.NumTickets > 100 || ev.RequestID == "" || !validHash(ev.PMSessionID) || ev.Ended <= 0 || ev.Started < 0 {
 					status, reason = "quarantined", "invalid fee, ticket count, request, timestamp, or PM session"

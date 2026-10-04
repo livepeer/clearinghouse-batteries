@@ -189,15 +189,26 @@ func TestQuarantineBindingsAndConflictingID(t *testing.T) {
 	ctx := context.Background()
 	valid := f.Event(t, "event", "10", testutil.PM)
 	require.NoError(t, f.DB.Ingest(ctx, "test", 0, 0, valid))
-	variants := [][]byte{[]byte(strings.ReplaceAll(string(valid), `"10"`, `"20"`)), []byte(strings.ReplaceAll(string(f.Event(t, "unknown", "10", testutil.PM)), f.Session, "unknown")), []byte(strings.ReplaceAll(string(f.Event(t, "binding", "10", testutil.PM)), "state-1", "state-other")), []byte(strings.ReplaceAll(string(f.Event(t, "missing", "10", testutil.PM)), f.Session, ""))}
+	variants := [][]byte{
+		[]byte(strings.ReplaceAll(string(valid), `"10"`, `"20"`)),
+		[]byte(strings.ReplaceAll(string(f.Event(t, "unknown", "10", testutil.PM)), f.Session, "unknown")),
+		[]byte(strings.ReplaceAll(string(f.Event(t, "binding", "10", testutil.PM)), "state-1", "state-other")),
+		[]byte(strings.ReplaceAll(string(f.Event(t, "missing", "10", testutil.PM)), f.Session, "")),
+		[]byte(strings.ReplaceAll(string(f.Event(t, "wrong-pipeline", "10", testutil.PM)), `"pipeline":"live"`, `"pipeline":"wrong"`)),
+		[]byte(strings.ReplaceAll(string(f.Event(t, "fixed-pipeline", "10", testutil.PM)), `"pipeline":"live"`, `"pipeline":"fixed"`)),
+		[]byte(strings.ReplaceAll(string(f.Event(t, "empty-pipeline", "10", testutil.PM)), `"pipeline":"live"`, `"pipeline":""`)),
+	}
 	for i, raw := range variants {
 		require.NoError(t, f.DB.Ingest(ctx, "test", 0, int64(i+1), raw))
 	}
 	var quarantined int
 	require.NoError(t, f.DB.DB.QueryRow(`SELECT count(*) FROM usage_events WHERE status='quarantined'`).Scan(&quarantined))
-	if quarantined != 4 {
+	if quarantined != len(variants) {
 		t.Fatal(quarantined)
 	}
+	var signed int
+	require.NoError(t, f.DB.DB.QueryRow(`SELECT count(*) FROM signing_authorizations`).Scan(&signed))
+	require.Equal(t, 1, signed)
 	bal, err := store.Balance(ctx, f.DB.DB, "allocation_available", f.Allocation)
 	require.NoError(t, err)
 	if bal.String() != "90" {
