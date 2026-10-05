@@ -4,7 +4,7 @@ go 1.27.1
 
 require (
 	github.com/BurntSushi/toml v1.6.0
-	github.com/ethereum/go-ethereum v1.17.6
+	github.com/ethereum/go-ethereum v1.17.7
 	github.com/j0sh/boa v0.0.3-0.20260926065355-ae47ed4e0e35
 	github.com/j0sh/minikafka v0.0.0-20260926062644-e1e6f1f8aae9
 	github.com/mattn/go-sqlite3 v1.14.52
@@ -12,7 +12,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.12.1
 	github.com/xdg-go/stringprep v1.0.4
-	golang.org/x/sync v0.22.0
+	golang.org/x/sync v0.23.0
 )
 
 require (
