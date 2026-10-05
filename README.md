@@ -98,6 +98,9 @@ After accounting applies ticket events, inspect balances:
 ./bin/clearinghouse ledger report
 ```
 
+See the [Docker Compose sample](examples/compose/README.md) for Clearinghouse +
+Livepeer Node signer, TLS termination, and a database backup/restore drill.
+
 ## How-to guides
 
 ### Run the services

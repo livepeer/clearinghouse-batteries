@@ -1,0 +1,13 @@
+# Use with: docker compose -f compose.yaml -f compose.gcs.yaml ...
+# Set REPLICA_ROOT=gs://YOUR_BUCKET/UNIQUE_DEPLOYMENT_PREFIX in .env.
+services:
+  litestream:
+    environment:
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcs.json
+    volumes:
+      - ./secrets/gcs.json:/run/secrets/gcs.json:ro
+  restore:
+    environment:
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcs.json
+    volumes:
+      - ./secrets/gcs.json:/run/secrets/gcs.json:ro

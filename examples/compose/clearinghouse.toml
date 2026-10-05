@@ -1,0 +1,11 @@
+DBPath = "/data/clearinghouse.db"
+CredsFile = "/run/secrets/clearinghouse.toml"
+EnableAuthWebhook = ":8080"
+EnableManagementAPI = ":8081"
+EnableKafka = true
+EnableAccounting = true
+KafkaBind = "127.0.0.1:9092"
+KafkaTopic = "livepeer-signing"
+# EnableOnchainListener = true
+# RPCURLFile = "/run/secrets/rpc-url"
+# SignerAddresses = ["0xYOUR_SIGNER"]

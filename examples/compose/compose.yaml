@@ -1,0 +1,89 @@
+name: clearinghouse-signer
+x-tunnel: &tunnel
+  image: cloudflare/cloudflared:2026.9.1
+  network_mode: service:clearinghouse
+  restart: unless-stopped
+  depends_on:
+    clearinghouse:
+      condition: service_healthy
+services:
+  clearinghouse:
+    image: clearinghouse-compose:local
+    build:
+      context: ../..
+      dockerfile: examples/compose/Dockerfile
+    command: [serve, --config-file, /etc/clearinghouse.toml]
+    volumes:
+      - state:/data
+      - ./clearinghouse.toml:/etc/clearinghouse.toml:ro
+      - ./secrets:/run/secrets:ro
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test: [CMD, curl, -fsS, http://127.0.0.1:8081/readyz]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+  signer:
+    image: livepeer-signer-compose:local
+    build:
+      context: ${NODE_SOURCE:-../../../node}
+      dockerfile: ${SIGNER_DOCKERFILE:-../clearinghouse/examples/compose/Dockerfile.signer}
+    # Kafka advertises loopback; share that namespace, without host networking.
+    network_mode: service:clearinghouse
+    depends_on:
+      clearinghouse:
+        condition: service_healthy
+    command: [--data-dir, /data/node, --config, /etc/signer.toml]
+    volumes:
+      - state:/data
+      - ./signer.toml:/etc/signer.toml:ro
+      - ./secrets:/run/secrets:ro
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test: [CMD, curl, -fsS, http://127.0.0.1:8938/readyz]
+      interval: 10s
+      timeout: 6s
+      retries: 6
+      start_period: 30s
+  webhook-tunnel:
+    <<: *tunnel
+    command: [tunnel, --no-autoupdate, --protocol, http2, --url, http://127.0.0.1:8080]
+  management-tunnel:
+    <<: *tunnel
+    command: [tunnel, --no-autoupdate, --protocol, http2, --url, http://127.0.0.1:8081]
+  signer-tunnel:
+    <<: *tunnel
+    command: [tunnel, --no-autoupdate, --protocol, http2, --url, http://127.0.0.1:8937]
+  litestream:
+    image: litestream/litestream:0.5.14
+    command: [replicate, -config, /etc/litestream.yml]
+    environment:
+      REPLICA_ROOT: ${REPLICA_ROOT:-file:///backup}
+    volumes:
+      - state:/data
+      - backup:/backup
+      - ./litestream.yml:/etc/litestream.yml:ro
+    restart: unless-stopped
+    stop_grace_period: 60s
+  restore:
+    image: litestream/litestream:0.5.14
+    profiles: [tools]
+    environment:
+      REPLICA_ROOT: ${REPLICA_ROOT:-file:///backup}
+    volumes:
+      - backup:/backup:ro
+      - ./litestream.yml:/etc/litestream.yml:ro
+      - ./restored:/restore
+  inspect:
+    image: python:3.13.7-slim-bookworm
+    profiles: [tools]
+    volumes:
+      - state:/data
+      - ./restored:/restore
+      - ./scripts:/scripts:ro
+    entrypoint: [python3, /scripts/databases.py]
+volumes:
+  state:
+  backup:
