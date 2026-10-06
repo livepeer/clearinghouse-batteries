@@ -80,7 +80,7 @@ func (s *Store) Authorize(ctx context.Context, req AuthRequest) (Decision, error
 			}
 			id := ID()
 			orch, _ := Address(req.State.OrchestratorAddress)
-			if _, err := tx.ExecContext(ctx, `INSERT INTO payment_sessions VALUES (?,?,?,?,?,?,?, 'active',?,?)`, id, snapshot.allocation, keyID, req.State.StateID, req.State.App, req.State.Type, orch, now, now); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO payment_sessions(id,allocation_id,api_key_id,state_id,app,payment_type,orchestrator,status,created_at_ms,last_seen_at_ms) VALUES (?,?,?,?,?,?,?, 'active',?,?)`, id, snapshot.allocation, keyID, req.State.StateID, req.State.App, req.State.Type, orch, now, now); err != nil {
 				return err
 			}
 			if _, err := tx.ExecContext(ctx, `UPDATE api_keys SET last_used_at_ms=? WHERE id=?`, now, keyID); err != nil {

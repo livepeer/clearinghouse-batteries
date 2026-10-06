@@ -79,6 +79,7 @@ func TestAllocationBalanceQueryIsolation(t *testing.T) {
 				require.Len(t, rows, 1)
 				base, err := f.DB.Rows(ctx, `SELECT * FROM grant_allocations WHERE id=?`, id)
 				require.NoError(t, err)
+				delete(base[0], "seq")
 				base[0]["available_units"] = []string{"1000000000000000001", "2000000000000000002"}[i]
 				base[0]["spent_units"] = "0"
 				require.Equal(t, base, rows)

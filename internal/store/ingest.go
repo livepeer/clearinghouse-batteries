@@ -131,7 +131,7 @@ func (s *Store) Ingest(ctx context.Context, topic string, partition int, offset 
 				}
 			}
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO usage_events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, uid, eventID, topic, partition, offset, raw, sessionID, ev.Pipeline, ev.RequestID, ev.Started, ev.Ended, string(ev.BillableSeconds), string(ev.Pixels), ev.ComputedFee, feeUSD, status, reason, now); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO usage_events(id,event_id,topic,partition,offset,raw_payload,payment_session_id,pipeline,request_id,started_at_ms,ended_at_ms,billable_seconds,pixels,computed_fee_wei,computed_fee_usd,status,error,created_at_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, uid, eventID, topic, partition, offset, raw, sessionID, ev.Pipeline, ev.RequestID, ev.Started, ev.Ended, string(ev.BillableSeconds), string(ev.Pixels), ev.ComputedFee, feeUSD, status, reason, now); err != nil {
 			return err
 		}
 		outcome, detail = status, reason
