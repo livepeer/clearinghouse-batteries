@@ -79,29 +79,43 @@ func TestExternalAccountingUsesRegistryCredential(t *testing.T) {
 	access := testRegistry(t).KafkaCredentials()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+	dbPath := filepath.Join(dir, "accounts.db")
+	// Finish SQLite initialization before Serve opens its connection. Keep this
+	// connection for polling so checks do not repeatedly configure WAL mode.
+	db, err := store.Open(ctx, dbPath, true)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	broker, err := kafka.OpenBroker(ctx, "127.0.0.1:0", "events", filepath.Join(dir, "broker"), access)
 	require.NoError(t, err)
 	brokerDone := make(chan error, 1)
 	go func() { brokerDone <- broker.Serve(ctx) }()
-	p := ServeParams{Common: Common{DBPath: filepath.Join(dir, "accounts.db")}, EnableAccounting: true, KafkaBroker: broker.Addr(), KafkaTopic: "events", CredsFile: testCredsFile(t)}
-	appDone := make(chan error, 1)
-	go func() { appDone <- Serve(ctx, p) }()
+	p := ServeParams{Common: Common{DBPath: dbPath}, EnableAccounting: true, KafkaBroker: broker.Addr(), KafkaTopic: "events", CredsFile: testCredsFile(t)}
+	appDone := make(chan struct{})
+	var appErr error
+	go func() {
+		appErr = Serve(ctx, p)
+		close(appDone)
+	}()
 	t.Cleanup(func() {
 		cancel()
-		require.NoError(t, <-appDone)
-		require.NoError(t, broker.Close())
-		require.NoError(t, <-brokerDone)
+		<-appDone
+		closeErr := broker.Close()
+		brokerErr := <-brokerDone
+		require.NoError(t, appErr)
+		require.NoError(t, closeErr)
+		require.NoError(t, brokerErr)
 	})
 	writer := kgo.NewWriter(kgo.WriterConfig{Brokers: []string{broker.Addr()}, Topic: "events", BatchTimeout: time.Millisecond, Dialer: &kgo.Dialer{SASLMechanism: plain.Mechanism{Username: "producer", Password: "write-secret"}}})
 	require.NoError(t, writer.WriteMessages(ctx, kgo.Message{Value: []byte(`{"id":"external-auth","type":"other","data":{}}`)}))
 	require.NoError(t, writer.Close())
 	testutil.Eventually(t, func() bool {
-		db, err := store.Open(ctx, p.DBPath, false)
-		if err != nil {
-			return false
+		select {
+		case <-appDone:
+			t.Fatalf("accounting service exited before processing the event: %v", appErr)
+		default:
 		}
-		defer db.Close()
 		next, _, _, err := db.Checkpoint(ctx, "kafka", store.KafkaStream("events", 0))
-		return err == nil && next == 1
+		require.NoError(t, err)
+		return next == 1
 	})
 }
