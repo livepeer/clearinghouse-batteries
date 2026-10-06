@@ -39,6 +39,7 @@ func TestEveryManagementRouteRequiresItsPermission(t *testing.T) {
 		{"PATCH", "/v1/allocations/{allocation}/status", "allocations.status", `{"status":"paused"}`, 200},
 		{"POST", "/v1/allocations/{allocation}/revoke", "allocations.revoke", "", 200},
 		{"GET", "/v1/api-keys", "api_keys.read", "", 200},
+		{"GET", "/v1/api-keys/{key}", "api_keys.read", "", 200},
 		{"POST", "/v1/api-keys", "api_keys.create", `{"name":"key","allocation_id":"{allocation}"}`, 201},
 		{"POST", "/v1/api-keys/{key}/revoke", "api_keys.revoke", "", 200},
 		{"GET", "/v1/sessions", "sessions.read", "", 200},
