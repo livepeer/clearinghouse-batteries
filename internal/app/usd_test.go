@@ -65,27 +65,25 @@ func TestUsageCurrencyOutput(t *testing.T) {
 			raw, err := json.Marshal(envelope)
 			require.NoError(t, err)
 			require.NoError(t, f.DB.Ingest(ctx, "usage", 0, 0, raw))
+			require.NoError(t, f.DB.Ingest(ctx, "usage", 0, 1, raw)) // Identical replay has an empty fee.
 			envelope["id"] = "quarantined"
-			envelope["data"].(map[string]any)["computed_fee_usd"] = "-1"
+			envelope["data"].(map[string]any)["computed_fee"] = "invalid"
 			raw, err = json.Marshal(envelope)
 			require.NoError(t, err)
-			require.NoError(t, f.DB.Ingest(ctx, "usage", 0, 1, raw))
+			require.NoError(t, f.DB.Ingest(ctx, "usage", 0, 2, raw))
 			response := managementRequest(t, managementHandler(ctx, f.DB, testRegistry(t)), "GET", "/v1/usage", "", "")
 			rows, next := managementPage(t, response, http.StatusOK)
-			require.Len(t, rows, 2)
+			require.Len(t, rows, 3)
 			require.Empty(t, next)
 			items, err := json.Marshal(rows)
 			require.NoError(t, err)
 			require.JSONEq(t, string(items), cli(t, "usage", "list"))
-			for _, row := range rows {
-				if row["event_id"] == "paid" {
-					require.Equal(t, currency, row["currency"])
-					require.Equal(t, "0.00000000000000001", row["computed_fee_eth"])
-					require.Equal(t, "0.25", row["computed_fee_usd"])
-				} else {
-					require.Equal(t, "quarantined", row["status"])
-					require.Nil(t, row["currency"])
-				}
+			for i, want := range []map[string]any{
+				{"status": "applied", "computed_fee_eth": "0.00000000000000001", "computed_fee_usd": "0.25", "currency": currency},
+				{"status": "duplicate", "computed_fee_eth": "", "computed_fee_usd": nil, "currency": nil},
+				{"status": "quarantined", "computed_fee_eth": "[error]", "computed_fee_usd": "0.25", "currency": nil},
+			} {
+				require.Subset(t, rows[i], want)
 			}
 		})
 	}

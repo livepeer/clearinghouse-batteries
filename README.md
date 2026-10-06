@@ -269,16 +269,15 @@ by `--db-path`.
 Amounts use `--amount-usd` or `--amount-eth` (`amount_usd` / `amount_eth` in the
 API): exact decimals with up to 18 fractional digits. New grants default to
 USD $0 if the amount is omitted. Allocations inherit their grant's currency.
-Allocation creation and funding accept `all`. JSON amounts are decimal `*_usd`
-or `*_eth` strings.
+Allocation creation and funding accept `all`. Signer events require an ETH fee;
+USD allocations also require a USD fee. Missing required fees or invalid supplied
+fees are quarantined. On-chain escrow and settlements remain in ETH.
 
-Allocation API and CLI reads include `available_usd`/`spent_usd` (or `_eth`
-equivalents), defaulting to `"0"` if empty. Available is the remaining balance
-and may be negative; spent totals recorded usage, including late charges after
-revocation.
-
-Signer events missing USD or ETH amounts are quarantined. On-chain escrow and
-settlements remain in ETH.
+API and CLI reports use decimal `*_usd` or `*_eth` strings for numeric amounts.
+Allocation reads include `available_*` for the remaining balance, which may be
+negative, and `spent_*` for recorded usage, including late charges after revocation.
+Empty amounts return `""`, null amounts return `null`, and failed amount conversions
+return `"[error]"`. Query the database directly to inspect the stored values.
 
 Grants default to `draft`. Allocations default to `active`, or `exhausted` with
 zero funding. Exhaustion is automatic; funding reactivates exhausted allocations
