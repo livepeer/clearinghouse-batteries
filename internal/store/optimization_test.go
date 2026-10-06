@@ -70,11 +70,11 @@ func TestAllocationBalanceQueryIsolation(t *testing.T) {
 				return nil
 			}))
 
-			list, err := f.DB.List(ctx, "allocation", "")
+			list, err := f.DB.List(ctx, "allocation", store.ListOptions{})
 			require.NoError(t, err)
 			require.Len(t, list, 2)
 			for i, id := range []string{f.Allocation, other} {
-				rows, err := f.DB.List(ctx, "allocation", id)
+				rows, err := f.DB.List(ctx, "allocation", store.ListOptions{ID: id})
 				require.NoError(t, err)
 				require.Len(t, rows, 1)
 				base, err := f.DB.Rows(ctx, `SELECT * FROM grant_allocations WHERE id=?`, id)
@@ -84,7 +84,7 @@ func TestAllocationBalanceQueryIsolation(t *testing.T) {
 				require.Equal(t, base, rows)
 				require.Equal(t, rows[0], list[i])
 			}
-			_, err = f.DB.List(ctx, "allocation", "missing")
+			_, err = f.DB.List(ctx, "allocation", store.ListOptions{ID: "missing"})
 			require.ErrorIs(t, err, sql.ErrNoRows)
 		})
 	}

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 
@@ -52,21 +53,26 @@ func managementHandler(ctx context.Context, db *store.Store, registry *serviceau
 	for _, resource := range []struct {
 		path, kind string
 		item       bool
+		query      []string
 	}{
-		{"grants", "grant", true},
-		{"allocations", "allocation", true},
-		{"api-keys", "api-key", true},
-		{"sessions", "session", true},
-		{"settlements", "settlement", false},
-		{"usage", "usage", false},
+		{"grants", "grant", true, nil},
+		{"allocations", "allocation", true, []string{"grant_id"}},
+		{"api-keys", "api-key", true, []string{"grant_id", "allocation_id"}},
+		{"sessions", "session", true, []string{"grant_id", "allocation_id"}},
+		{"settlements", "settlement", false, []string{"grant_id", "allocation_id"}},
+		{"usage", "usage", false, []string{"grant_id", "allocation_id"}},
 	} {
 		path, kind := resource.path, resource.kind
 		handle("GET /v1/"+path, strings.ReplaceAll(path, "-", "_")+".read", http.StatusOK, func(w http.ResponseWriter, r *http.Request) (any, error) {
-			return db.List(r.Context(), kind, "")
+			query, err := managementQuery(r, resource.query...)
+			if err != nil {
+				return nil, err
+			}
+			return db.List(r.Context(), kind, store.ListOptions{GrantID: query.Get("grant_id"), AllocationID: query.Get("allocation_id")})
 		})
 		if resource.item {
 			handle("GET /v1/"+path+"/{id}", strings.ReplaceAll(path, "-", "_")+".read", http.StatusOK, func(w http.ResponseWriter, r *http.Request) (any, error) {
-				rows, err := db.List(r.Context(), kind, r.PathValue("id"))
+				rows, err := db.List(r.Context(), kind, store.ListOptions{ID: r.PathValue("id")})
 				if err != nil {
 					return nil, err
 				}
@@ -179,6 +185,25 @@ func managementHandler(ctx context.Context, db *store.Store, registry *serviceau
 		w.Header().Set("Cache-Control", "no-store")
 		mux.ServeHTTP(w, r)
 	})
+}
+
+func managementQuery(r *http.Request, allowed ...string) (url.Values, error) {
+	query, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		return nil, badManagementRequest("invalid query parameters")
+	}
+	for name, entries := range query {
+		if !slices.Contains(allowed, name) {
+			return nil, badManagementRequest("unknown query parameter: " + name)
+		}
+		if len(entries) != 1 {
+			return nil, badManagementRequest("expected one value for " + name)
+		}
+		if entries[0] == "" {
+			return nil, badManagementRequest(name + " must not be empty")
+		}
+	}
+	return query, nil
 }
 
 func managementFields(w http.ResponseWriter, r *http.Request, allowed ...string) (map[string]string, error) {

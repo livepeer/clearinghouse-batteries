@@ -344,10 +344,21 @@ curl -H 'Livepeer-Clearinghouse-Token: OPERATOR_SECRET' \
 
 Responses use the CLI's JSON fields and types, including decimal amount strings,
 millisecond timestamps, and string `metadata`. Item routes return one object;
-lists have no filtering or pagination. New API-key secrets are returned once.
+lists return arrays and have no pagination. New API-key secrets are returned once.
 Migrations are CLI-only.
 
+```sh
+curl -H 'Livepeer-Clearinghouse-Token: OPERATOR_SECRET' \
+  'https://management.clearinghouse.example.com/v1/allocations?grant_id=GRANT_ID'
+
+curl -H 'Livepeer-Clearinghouse-Token: OPERATOR_SECRET' \
+  'https://management.clearinghouse.example.com/v1/sessions?grant_id=GRANT_ID&allocation_id=ALLOCATION_ID'
+```
+
+
 Missing or invalid credentials, or credentials for another service, return `401`.
+Malformed queries, unknown parameters, repeated parameters and empty values
+return `400`. HEAD requests use the same list query validation as GET.
 Missing route permissions return `403`. Both use plain text. Additional funding
 permission failures return `403` with a JSON `error` string. Other errors from
 resource handlers also use JSON `error` strings:
@@ -360,6 +371,19 @@ resource handlers also use JSON `error` strings:
 | `413` | Body exceeds 1 MiB. |
 | `415` | Unsupported or missing content type. |
 | `500` | Unexpected failure. |
+
+Resource list routes allow only the following query parameters:
+
+| List route | Allowed query parameters |
+| --- | --- |
+| `/v1/grants` | None |
+| `/v1/allocations` | `grant_id` |
+| `/v1/api-keys`, `/v1/sessions`, `/v1/usage`, `/v1/settlements` | `grant_id`, `allocation_id` |
+
+Filters match IDs exactly. When both filters are supplied, results must match
+both. Unknown IDs or an allocation that does not belong to the specified grant
+return `200` with `[]`. Usage and settlements without an associated session
+appear only in unfiltered lists.
 
 ## Development
 

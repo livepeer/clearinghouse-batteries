@@ -117,7 +117,7 @@ func TestExpiryPauseAndNoSecrets(t *testing.T) {
 	if d.Status != 403 {
 		t.Fatal(d)
 	}
-	keys, err := f.DB.List(ctx, "api-key", "")
+	keys, err := f.DB.List(ctx, "api-key", store.ListOptions{})
 	require.NoError(t, err)
 	b, err := json.Marshal(keys)
 	require.NoError(t, err)
