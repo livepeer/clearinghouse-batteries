@@ -269,6 +269,11 @@ USD $0 if the amount is omitted. Allocations inherit their grant's currency.
 Allocation creation and funding
 accept `all`. JSON amounts are decimal `*_usd` or `*_eth` strings.
 
+Allocation API and CLI reads include `available_usd`/`spent_usd` (or `_eth`
+equivalents), defaulting to `"0"` if empty. Available is the remaining balance
+and may be negative; spent totals recorded usage, including late charges after
+revocation.
+
 Signer events missing USD or ETH amounts are quarantined. On-chain escrow and
 settlements remain in ETH.
 
@@ -319,7 +324,7 @@ Resource routes require management credentials. The examples use a TLS proxy at
 | --- | --- |
 | Grants | `GET, POST /v1/grants`; `GET /v1/grants/{id}`; `POST /v1/grants/{id}/fund`; `PATCH /v1/grants/{id}/status` |
 | Allocations | `GET, POST /v1/allocations`; `GET /v1/allocations/{id}`; `POST /v1/allocations/{id}/fund`; `PATCH /v1/allocations/{id}/status`; `POST /v1/allocations/{id}/revoke` |
-| API keys | `GET, POST /v1/api-keys`; `POST /v1/api-keys/{id}/revoke` |
+| API keys | `GET, POST /v1/api-keys`; `GET /v1/api-keys/{id}`; `POST /v1/api-keys/{id}/revoke` |
 | Sessions | `GET /v1/sessions`; `GET /v1/sessions/{id}`; `POST /v1/sessions/{id}/revoke` |
 | Reports | `GET /v1/settlements`, `/v1/usage`, `/v1/ledger/report`, `/v1/escrow/report`, `/v1/escrow/activity` |
 
