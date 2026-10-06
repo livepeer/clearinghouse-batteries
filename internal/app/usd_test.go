@@ -71,11 +71,13 @@ func TestUsageCurrencyOutput(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, f.DB.Ingest(ctx, "usage", 0, 1, raw))
 			response := managementRequest(t, managementHandler(ctx, f.DB, testRegistry(t)), "GET", "/v1/usage", "", "")
-			rows := managementArray(t, response, http.StatusOK)
+			rows, next := managementPage(t, response, http.StatusOK)
 			require.Len(t, rows, 2)
-			require.JSONEq(t, response.Body.String(), cli(t, "usage", "list"))
-			for _, item := range rows {
-				row := item.(map[string]any)
+			require.Empty(t, next)
+			items, err := json.Marshal(rows)
+			require.NoError(t, err)
+			require.JSONEq(t, string(items), cli(t, "usage", "list"))
+			for _, row := range rows {
 				if row["event_id"] == "paid" {
 					require.Equal(t, currency, row["currency"])
 					require.Equal(t, "0.00000000000000001", row["computed_fee_eth"])
@@ -119,11 +121,11 @@ func TestAllocationBalanceReads(t *testing.T) {
 				}
 
 				response := managementRequest(t, handler, "GET", "/v1/allocations", "", "", "limited-secret")
-				list := managementArray(t, response, http.StatusOK)
+				list, next := managementPage(t, response, http.StatusOK)
 				require.Len(t, list, 2)
+				require.Empty(t, next)
 				var listed map[string]any
-				for _, item := range list {
-					candidate := item.(map[string]any)
+				for _, candidate := range list {
 					if candidate["id"] == id {
 						listed = candidate
 					}
@@ -133,7 +135,9 @@ func TestAllocationBalanceReads(t *testing.T) {
 					}
 				}
 				require.Equal(t, row, listed)
-				require.JSONEq(t, response.Body.String(), cli(t, "allocation", "list"))
+				items, err := json.Marshal(list)
+				require.NoError(t, err)
+				require.JSONEq(t, string(items), cli(t, "allocation", "list"))
 				var shown []map[string]any
 				require.NoError(t, json.Unmarshal([]byte(cli(t, "allocation", "show", "--id", id)), &shown))
 				require.Equal(t, []map[string]any{row}, shown)

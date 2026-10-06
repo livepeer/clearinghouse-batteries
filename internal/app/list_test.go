@@ -2,8 +2,11 @@ package app
 
 import (
 	"bytes"
+	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"slices"
@@ -24,15 +27,19 @@ func newListFixture(t *testing.T) (*testutil.Fixture, []listOwner) {
 	f := testutil.New(t, "100")
 	owners := []listOwner{{f.Grant, f.Allocation, f.KeyID, f.Session}}
 	require.NoError(t, f.DB.Fund(t.Context(), "grant", f.Grant, "100"))
-	for i := 1; i < 3; i++ {
-		grant := f.Grant
+	for i := 1; i < 4; i++ {
+		grant, allocation := f.Grant, f.Allocation
 		if i == 2 {
 			var err error
 			grant, err = f.DB.Create(t.Context(), "grant", store.Create{Name: "other grant", Amount: "100", Currency: "eth", Status: "active"})
 			require.NoError(t, err)
 		}
-		allocation, err := f.DB.Create(t.Context(), "allocation", store.Create{Name: "other allocation", GrantID: grant, Amount: "100"})
-		require.NoError(t, err)
+		// The final key and session reuse the first allocation to span filtered pages.
+		if i < 3 {
+			var err error
+			allocation, err = f.DB.Create(t.Context(), "allocation", store.Create{Name: "other allocation", GrantID: grant, Amount: "100"})
+			require.NoError(t, err)
+		}
 		keyID, key, err := f.DB.CreateKey(t.Context(), allocation, "other key")
 		require.NoError(t, err)
 		request := f.Request
@@ -52,24 +59,24 @@ func newListFixture(t *testing.T) (*testutil.Fixture, []listOwner) {
 		_, err := f.DB.DB.Exec("INSERT INTO usage_events (id,event_id,topic,partition,offset,raw_payload,payment_session_id,status,created_at_ms) VALUES (?,?,'list',0,?,?,?,'applied',1)", id, id, i, []byte("{}"), owner.session)
 		require.NoError(t, err)
 	}
-	_, err := f.DB.DB.Exec("INSERT INTO usage_events (id,topic,partition,offset,raw_payload,status,created_at_ms) VALUES ('usage-unassociated','list',0,3,?,'quarantined',1)", []byte("{bad"))
+	_, err := f.DB.DB.Exec("INSERT INTO usage_events (id,topic,partition,offset,raw_payload,status,created_at_ms) VALUES ('usage-unassociated','list',0,4,?,'quarantined',1)", []byte("{bad"))
 	require.NoError(t, err)
-	for i, session := range []any{owners[0].session, owners[1].session, owners[2].session, nil, nil} {
+	for i, session := range []any{owners[0].session, owners[1].session, owners[2].session, owners[3].session, nil, nil} {
 		match, status := "matched", "settled"
 		if i == 1 {
 			status = "orphaned"
-		} else if i == 3 {
-			match = "unmatched"
 		} else if i == 4 {
+			match = "unmatched"
+		} else if i == 5 {
 			match = "ambiguous"
 		}
 		_, err := f.DB.DB.Exec("INSERT INTO settlements (id,chain_id,contract_address,tx_hash,log_index,block_number,block_hash,sender,recipient,face_value_wei,paid_amount_wei,deposit_paid_wei,reserve_paid_wei,win_probability,sender_nonce,recipient_rand,pm_session_id,aux_data,payment_session_id,match_status,status,created_at_ms,settled_at_ms) VALUES (?,'42161',?,?,0,0,?,?,?,'0','0','0','0','0','0','0',?,'0x',?,?,?,1,1)",
 			fmt.Sprint("settlement-", i), testutil.Contract, fmt.Sprintf("0x%064x", i+1), testutil.PM, testutil.Sender, testutil.Orch, testutil.PM, session, match, status)
 		require.NoError(t, err)
 	}
-	// Equal timestamps exercise the ID tie-breaker on every list.
-	for _, table := range []string{"grants", "grant_allocations", "api_keys", "payment_sessions"} {
-		_, err := f.DB.DB.Exec("UPDATE " + table + " SET created_at_ms=1")
+	// Timestamps deliberately disagree with insertion order on every list.
+	for _, table := range []string{"grants", "grant_allocations", "api_keys", "payment_sessions", "usage_events", "settlements"} {
+		_, err := f.DB.DB.Exec("UPDATE " + table + " SET created_at_ms=100-seq")
 		require.NoError(t, err)
 	}
 	return f, owners
@@ -86,7 +93,7 @@ func listIDs(t *testing.T, rows []map[string]any) []string {
 	return ids
 }
 
-func TestResourceListFilters(t *testing.T) {
+func TestResourceListFiltersAndPagination(t *testing.T) {
 	f, owners := newListFixture(t)
 	t.Setenv("CLEARINGHOUSE_DB_PATH", f.Path)
 	handler := managementHandler(t.Context(), f.DB, testRegistry(t))
@@ -99,25 +106,28 @@ func TestResourceListFilters(t *testing.T) {
 		path, kind   string
 		ids, unowned []string
 	}{
-		{"allocations", "allocation", []string{owners[0].allocation, owners[1].allocation, owners[2].allocation}, nil},
-		{"api-keys", "api-key", []string{owners[0].key, owners[1].key, owners[2].key}, nil},
-		{"sessions", "session", []string{owners[0].session, owners[1].session, owners[2].session}, nil},
-		{"usage", "usage", []string{"usage-0", "usage-1", "usage-2"}, []string{"usage-unassociated"}},
-		{"settlements", "settlement", []string{"settlement-0", "settlement-1", "settlement-2"}, []string{"settlement-3", "settlement-4"}},
+		{"grants", "grant", []string{owners[0].grant, owners[1].grant, owners[2].grant, owners[3].grant}, nil},
+		{"allocations", "allocation", []string{owners[0].allocation, owners[1].allocation, owners[2].allocation, owners[3].allocation}, nil},
+		{"api-keys", "api-key", []string{owners[0].key, owners[1].key, owners[2].key, owners[3].key}, nil},
+		{"sessions", "session", []string{owners[0].session, owners[1].session, owners[2].session, owners[3].session}, nil},
+		{"usage", "usage", []string{"usage-0", "usage-1", "usage-2", "usage-3"}, []string{"usage-unassociated"}},
+		{"settlements", "settlement", []string{"settlement-0", "settlement-1", "settlement-2", "settlement-3"}, []string{"settlement-4", "settlement-5"}},
 	} {
-		cases := []filterCase{
-			{"unfiltered", store.ListOptions{}, []int{0, 1, 2}},
-			{"grant", store.ListOptions{GrantID: owners[0].grant}, []int{0, 1}},
-			{"other grant", store.ListOptions{GrantID: owners[2].grant}, []int{2}},
-			{"unknown grant", store.ListOptions{GrantID: "missing"}, nil},
-			{"literal grant ID", store.ListOptions{GrantID: "' OR 1=1 --"}, nil},
-		}
-		if resource.kind != "allocation" {
+		cases := []filterCase{{"unfiltered", store.ListOptions{}, []int{0, 1, 2, 3}}}
+		if resource.kind != "grant" {
 			cases = append(cases,
-				filterCase{"allocation", store.ListOptions{AllocationID: owners[0].allocation}, []int{0}},
+				filterCase{"grant", store.ListOptions{GrantID: owners[0].grant}, []int{0, 1, 3}},
+				filterCase{"other grant", store.ListOptions{GrantID: owners[2].grant}, []int{2}},
+				filterCase{"unknown grant", store.ListOptions{GrantID: "missing"}, nil},
+				filterCase{"literal grant ID", store.ListOptions{GrantID: "' OR 1=1 --"}, nil},
+			)
+		}
+		if resource.kind != "grant" && resource.kind != "allocation" {
+			cases = append(cases,
+				filterCase{"allocation", store.ListOptions{AllocationID: owners[0].allocation}, []int{0, 3}},
 				filterCase{"unknown allocation", store.ListOptions{AllocationID: "missing"}, nil},
 				filterCase{"literal allocation ID", store.ListOptions{AllocationID: "' OR 1=1 --"}, nil},
-				filterCase{"both matching", store.ListOptions{GrantID: owners[0].grant, AllocationID: owners[1].allocation}, []int{1}},
+				filterCase{"both matching", store.ListOptions{GrantID: owners[0].grant, AllocationID: owners[0].allocation}, []int{0, 3}},
 				filterCase{"ownership mismatch", store.ListOptions{GrantID: owners[2].grant, AllocationID: owners[0].allocation}, nil},
 				filterCase{"both unknown", store.ListOptions{GrantID: "missing", AllocationID: "missing"}, nil},
 			)
@@ -126,12 +136,13 @@ func TestResourceListFilters(t *testing.T) {
 			t.Run(resource.path+"/"+tc.name, func(t *testing.T) {
 				want := []string{}
 				for _, i := range tc.owners {
-					want = append(want, resource.ids[i])
+					if !slices.Contains(want, resource.ids[i]) {
+						want = append(want, resource.ids[i])
+					}
 				}
 				if tc.options == (store.ListOptions{}) {
 					want = append(want, resource.unowned...)
 				}
-				slices.Sort(want)
 				query := url.Values{}
 				args := []string{resource.kind, "list"}
 				if tc.options.GrantID != "" {
@@ -142,16 +153,17 @@ func TestResourceListFilters(t *testing.T) {
 					query.Set("allocation_id", tc.options.AllocationID)
 					args = append(args, "--allocation-id", tc.options.AllocationID)
 				}
-				response := managementRequest(t, handler, "GET", "/v1/"+resource.path+"?"+query.Encode(), "", "")
-				require.Equal(t, http.StatusOK, response.Code, response.Body.String())
-				require.Equal(t, "application/json", response.Header().Get("Content-Type"))
-				require.Equal(t, "no-store", response.Header().Get("Cache-Control"))
-				var httpRows []map[string]any
-				require.NoError(t, json.Unmarshal(response.Body.Bytes(), &httpRows))
-				require.NotNil(t, httpRows)
-				require.Equal(t, want, listIDs(t, httpRows))
 				output := cli(t, args...)
-				require.JSONEq(t, response.Body.String(), output)
+				var cliRows []map[string]any
+				require.NoError(t, json.Unmarshal([]byte(output), &cliRows))
+				require.Equal(t, want, listIDs(t, cliRows))
+				limits := []int{1}
+				if tc.options == (store.ListOptions{}) {
+					limits = slices.Compact([]int{1, 2, len(want), maxListLimit})
+				}
+				for _, limit := range limits {
+					require.Equal(t, cliRows, managementPages(t, handler, "/v1/"+resource.path, query, limit, len(want)))
+				}
 				if resource.kind == "api-key" {
 					require.NotContains(t, output, "secret_hash")
 					require.NotContains(t, output, f.Key)
@@ -178,12 +190,14 @@ func TestManagementListQueries(t *testing.T) {
 		{"usage", []string{"grant_id", "allocation_id"}},
 		{"settlements", []string{"grant_id", "allocation_id"}},
 	} {
-		managementArray(t, managementRequest(t, handler, "GET", "/v1/"+route.path, "", ""), http.StatusOK)
+		managementPage(t, managementRequest(t, handler, "GET", "/v1/"+route.path, "", ""), http.StatusOK)
 		for _, name := range []string{"grant_id", "allocation_id", "unknown"} {
 			t.Run(route.path+"/"+name, func(t *testing.T) {
 				response := managementRequest(t, handler, "GET", "/v1/"+route.path+"?"+name+"=missing", "", "")
 				if slices.Contains(route.allowed, name) {
-					require.Empty(t, managementArray(t, response, http.StatusOK))
+					items, next := managementPage(t, response, http.StatusOK)
+					require.Empty(t, items)
+					require.Empty(t, next)
 				} else {
 					require.Equal(t, "unknown query parameter: "+name, managementObject(t, response, http.StatusBadRequest)["error"])
 				}
@@ -192,7 +206,7 @@ func TestManagementListQueries(t *testing.T) {
 	}
 	// All list routes share the same parser; exercise its edge cases once.
 	invalid := []string{"unknown=", "GrantID=x", "grant-id=x", "grant_id=%zz", "grant_id=x;y", "grant_id=missing&unknown=%zz", "grant_id=x&grant%5Fid=x"}
-	for _, name := range []string{"grant_id", "allocation_id"} {
+	for _, name := range []string{"grant_id", "allocation_id", "limit", "cursor"} {
 		invalid = append(invalid, name, name+"=", name+"=x&"+name+"=x", name+"=x&"+name+"=y", name+"=&"+name+"=", name+"=x&"+name+"=")
 	}
 	for _, query := range invalid {
@@ -212,6 +226,10 @@ func TestManagementListQueryAuthFirst(t *testing.T) {
 	registry := testRegistry(t, testHTTPCredentials, `{"id":"limited","secret":"limited-secret","management":{"allow":["ledger.read"]}}`)
 	handler := managementHandler(t.Context(), f.DB, registry)
 	for _, path := range []string{"grants", "allocations", "api-keys", "sessions", "usage", "settlements"} {
+		queries := []string{"grant_id=%zz"}
+		if path == "sessions" {
+			queries = append(queries, "limit=0", "cursor=bad")
+		}
 		for _, credential := range []struct {
 			token  string
 			status int
@@ -222,12 +240,145 @@ func TestManagementListQueryAuthFirst(t *testing.T) {
 			{"limited-secret", http.StatusForbidden},
 		} {
 			for _, method := range []string{"GET", "HEAD"} {
-				response := managementRequest(t, handler, method, "/v1/"+path+"?grant_id=%zz", "", "", credential.token)
-				require.Equal(t, credential.status, response.Code, method+" "+path)
-				require.True(t, strings.HasPrefix(response.Header().Get("Content-Type"), "text/plain"))
+				for _, query := range queries {
+					response := managementRequest(t, handler, method, "/v1/"+path+"?"+query, "", "", credential.token)
+					require.Equal(t, credential.status, response.Code, method+" "+path)
+					require.True(t, strings.HasPrefix(response.Header().Get("Content-Type"), "text/plain"))
+				}
 			}
 		}
 	}
+}
+
+func managementPages(t *testing.T, handler http.Handler, path string, query url.Values, limit, total int) []map[string]any {
+	t.Helper()
+	query = maps.Clone(query)
+	query.Set("limit", fmt.Sprint(limit))
+	all := []map[string]any{}
+	for range total + 1 {
+		items, next := managementPage(t, managementRequest(t, handler, "GET", path+"?"+query.Encode(), "", ""), http.StatusOK)
+		require.Len(t, items, min(limit, total-len(all)))
+		all = append(all, items...)
+		require.Equal(t, len(all) < total, next != "")
+		if next == "" {
+			return all
+		}
+		require.NotEqual(t, query.Get("cursor"), next)
+		query.Set("cursor", next)
+	}
+	t.Fatal("pagination did not terminate")
+	return nil
+}
+
+func TestManagementPaginationLimitAndLiveData(t *testing.T) {
+	f := testutil.New(t, "100")
+	handler := managementHandler(t.Context(), f.DB, testRegistry(t))
+	// Opposing IDs and timestamps establish that only seq controls ordering.
+	_, err := f.DB.DB.Exec(`INSERT INTO grants(id,name,total_units,status,created_at_ms) VALUES ('z','first','0','draft',2),('a','second','0','draft',1)`)
+	require.NoError(t, err)
+	first, cursor := managementPage(t, managementRequest(t, handler, "GET", "/v1/grants?limit=1", "", ""), http.StatusOK)
+	require.Equal(t, []string{f.Grant}, listIDs(t, first))
+	require.NotEmpty(t, cursor)
+	// A deletion makes a gap, and a later insert remains visible to this traversal.
+	_, err = f.DB.DB.Exec(`DELETE FROM grants WHERE id='z'`)
+	require.NoError(t, err)
+	_, err = f.DB.DB.Exec(`INSERT INTO grants(id,name,total_units,status,created_at_ms) VALUES ('0','third','0','draft',0)`)
+	require.NoError(t, err)
+	remaining, next := managementPage(t, managementRequest(t, handler, "GET", "/v1/grants?limit=2&cursor="+cursor, "", ""), http.StatusOK)
+	require.Equal(t, []string{"a", "0"}, listIDs(t, remaining))
+	require.Empty(t, next)
+	_, err = f.DB.DB.Exec(`DELETE FROM grants WHERE id='0'`)
+	require.NoError(t, err)
+	// Include enough rows to prove the default is bounded and the CLI is not.
+	require.NoError(t, f.DB.Write(t.Context(), func(tx *sql.Tx) error {
+		for i := range defaultListLimit {
+			if _, err := tx.Exec(`INSERT INTO grants(id,name,total_units,status,created_at_ms) VALUES (?,?,'0','draft',0)`, fmt.Sprint("more-", i), "grant"); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	items, next := managementPage(t, managementRequest(t, handler, "GET", "/v1/grants", "", ""), http.StatusOK)
+	require.Len(t, items, defaultListLimit)
+	require.NotEmpty(t, next)
+	t.Setenv("CLEARINGHOUSE_DB_PATH", f.Path)
+	var cliRows []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(cli(t, "grant", "list")), &cliRows))
+	require.Len(t, cliRows, defaultListLimit+2)
+	for _, row := range cliRows {
+		require.NotContains(t, row, "seq")
+	}
+	item := managementObject(t, managementRequest(t, handler, "GET", "/v1/grants/"+f.Grant, "", ""), http.StatusOK)
+	require.NotContains(t, item, "seq")
+}
+
+func TestManagementPaginationInvalidQueries(t *testing.T) {
+	f := testutil.New(t, "100")
+	handler := managementHandler(t.Context(), f.DB, testRegistry(t))
+	invalid := []string{"limit=0", "limit=-1", "limit=1001", "limit=18446744073709551616", "limit=1.0", "limit=1e2", "limit=%2B1", "limit=%201", "cursor=bad", "cursor=%zz"}
+	for _, raw := range []string{
+		`null`, `{}`, `[]`, `{"version":1,"kind":"session","seq":0}`,
+		`{"version":1,"kind":"session","seq":-1}`, `{"version":1,"kind":"session","seq":9223372036854775808}`,
+		`{"version":1,"kind":"session","seq":1.5}`, `{"version":1,"kind":"session","seq":"1"}`,
+		`{"version":2,"kind":"session","seq":1}`, `{"version":1,"kind":"session","seq":1,"seq":2}`,
+		`{"version":1,"kind":"session","seq":1,"extra":true}`, `{"version":1,"kind":"session","seq":1} {}`,
+	} {
+		invalid = append(invalid, "cursor="+base64.RawURLEncoding.EncodeToString([]byte(raw)))
+	}
+	for _, cursor := range []listCursor{
+		{Version: 1, Kind: "grant", Seq: 1},
+		{Version: 1, Kind: "session", GrantID: f.Grant, Seq: 1},
+		{Version: 1, Kind: "session", AllocationID: f.Allocation, Seq: 1},
+	} {
+		invalid = append(invalid, "cursor="+cursor.encode())
+	}
+	for _, query := range invalid {
+		t.Run(query, func(t *testing.T) {
+			for _, method := range []string{"GET", "HEAD"} {
+				response := managementRequest(t, handler, method, "/v1/sessions?"+query, "", "")
+				managementObject(t, response, http.StatusBadRequest)
+			}
+		})
+	}
+	for _, query := range []string{"limit=1", "limit=1000", "cursor=" + (listCursor{Version: 1, Kind: "session", Seq: 9223372036854775807}).encode()} {
+		response := managementRequest(t, handler, "HEAD", "/v1/sessions?"+query, "", "")
+		require.Equal(t, http.StatusOK, response.Code)
+	}
+	items, next := managementPage(t, managementRequest(t, handler, "GET", "/v1/sessions?cursor="+(listCursor{Version: 1, Kind: "session", Seq: 9223372036854775807}).encode(), "", ""), http.StatusOK)
+	require.Empty(t, items)
+	require.Empty(t, next)
+}
+
+func TestResourceSequencesPersist(t *testing.T) {
+	f, _ := newListFixture(t)
+	before := map[string][]map[string]any{}
+	for _, table := range []string{"grants", "grant_allocations", "api_keys", "payment_sessions", "usage_events", "settlements"} {
+		rows, err := f.DB.Rows(t.Context(), "SELECT id,seq FROM "+table+" ORDER BY seq")
+		require.NoError(t, err)
+		for i, row := range rows {
+			require.Equal(t, int64(i+1), row["seq"], table)
+		}
+		before[table] = rows
+		var definition string
+		require.NoError(t, f.DB.DB.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&definition))
+		require.Contains(t, definition, "seq INTEGER PRIMARY KEY AUTOINCREMENT")
+	}
+	var deleted, inserted int64
+	require.NoError(t, f.DB.DB.QueryRow(`INSERT INTO grants(id,name,total_units,status,created_at_ms) VALUES ('deleted','grant','0','draft',0) RETURNING seq`).Scan(&deleted))
+	_, err := f.DB.DB.Exec(`DELETE FROM grants WHERE id='deleted'`)
+	require.NoError(t, err)
+	_, err = f.DB.DB.Exec("VACUUM")
+	require.NoError(t, err)
+	for table, want := range before {
+		rows, err := f.DB.Rows(t.Context(), "SELECT id,seq FROM "+table+" ORDER BY seq")
+		require.NoError(t, err)
+		require.Equal(t, want, rows, table)
+	}
+	require.NoError(t, f.DB.DB.QueryRow(`INSERT INTO grants(id,name,total_units,status,created_at_ms) VALUES ('inserted','grant','0','draft',0) RETURNING seq`).Scan(&inserted))
+	require.Greater(t, inserted, deleted)
+	violations, err := f.DB.Rows(t.Context(), "PRAGMA foreign_key_check")
+	require.NoError(t, err)
+	require.Empty(t, violations)
 }
 
 func TestCLIListFilterFlags(t *testing.T) {

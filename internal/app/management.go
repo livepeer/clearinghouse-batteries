@@ -64,11 +64,11 @@ func managementHandler(ctx context.Context, db *store.Store, registry *serviceau
 	} {
 		path, kind := resource.path, resource.kind
 		handle("GET /v1/"+path, strings.ReplaceAll(path, "-", "_")+".read", http.StatusOK, func(w http.ResponseWriter, r *http.Request) (any, error) {
-			query, err := managementQuery(r, resource.query...)
+			options, err := managementListQuery(r, kind, resource.query...)
 			if err != nil {
 				return nil, err
 			}
-			return db.List(r.Context(), kind, store.ListOptions{GrantID: query.Get("grant_id"), AllocationID: query.Get("allocation_id")})
+			return managementList(r.Context(), db, kind, options)
 		})
 		if resource.item {
 			handle("GET /v1/"+path+"/{id}", strings.ReplaceAll(path, "-", "_")+".read", http.StatusOK, func(w http.ResponseWriter, r *http.Request) (any, error) {

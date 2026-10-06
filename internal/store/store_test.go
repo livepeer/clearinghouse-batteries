@@ -80,13 +80,14 @@ func TestMigrationsConstraintsAndRoundTrip(t *testing.T) {
 		require.NoError(t, f.DB.DB.QueryRowContext(ctx, q).Scan(&metadata), q)
 		require.Equal(t, "", metadata, q)
 	}
-	for _, index := range []string{"allocations_grant", "keys_allocation", "sessions_allocation", "usage_status", "signing_match", "ledger_account", "ledger_transaction", "settlements_match", "settlements_block", "ticket_broker_events_block", "ticket_broker_events_sender"} {
-		var n int
-		require.NoError(t, f.DB.DB.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='index' AND name=?`, index).Scan(&n))
-		if n != 1 {
-			t.Fatalf("missing index %s", index)
-		}
+	// Constraint indexes have NULL SQL; compare the complete set of explicit indexes.
+	indexes, err := f.DB.Rows(ctx, `SELECT name FROM sqlite_master WHERE type='index' AND sql IS NOT NULL ORDER BY name`)
+	require.NoError(t, err)
+	actual := make([]string, len(indexes))
+	for i, index := range indexes {
+		actual[i] = index["name"].(string)
 	}
+	require.ElementsMatch(t, []string{"allocations_grant", "keys_allocation", "sessions_allocation", "usage_status", "usage_session", "signing_match", "balances_owner", "ledger_account", "ledger_transaction", "settlements_match", "settlements_block", "settlements_session", "ticket_broker_events_block", "ticket_broker_events_sender"}, actual)
 	require.NoError(t, migrations.Up(ctx, f.DB.DB))
 	list, err := migrations.List(ctx, f.DB.DB)
 	require.NoError(t, err)

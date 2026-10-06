@@ -1,6 +1,6 @@
 -- UP
 CREATE TABLE grants (
- id TEXT PRIMARY KEY, name TEXT NOT NULL, sponsor TEXT NOT NULL DEFAULT '',
+ seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, name TEXT NOT NULL, sponsor TEXT NOT NULL DEFAULT '',
  total_units TEXT NOT NULL CHECK(total_units <> '' AND total_units NOT GLOB '*[^0-9]*' AND (total_units='0' OR substr(total_units,1,1)<>'0')),
  currency TEXT NOT NULL DEFAULT 'usd' CHECK(currency IN ('usd','eth')),
  starts_at_ms INTEGER, ends_at_ms INTEGER,
@@ -9,7 +9,7 @@ CREATE TABLE grants (
  CHECK(starts_at_ms IS NULL OR ends_at_ms IS NULL OR ends_at_ms > starts_at_ms)
 ) STRICT;
 CREATE TABLE grant_allocations (
- id TEXT PRIMARY KEY, grant_id TEXT NOT NULL REFERENCES grants(id), name TEXT NOT NULL, beneficiary TEXT NOT NULL DEFAULT '',
+ seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, grant_id TEXT NOT NULL REFERENCES grants(id), name TEXT NOT NULL, beneficiary TEXT NOT NULL DEFAULT '',
  allocated_units TEXT NOT NULL CHECK(allocated_units <> '' AND allocated_units NOT GLOB '*[^0-9]*' AND (allocated_units='0' OR substr(allocated_units,1,1)<>'0')),
  currency TEXT NOT NULL CHECK(currency IN ('usd','eth')),
  starts_at_ms INTEGER, ends_at_ms INTEGER,
@@ -26,14 +26,14 @@ CREATE TRIGGER allocations_currency_matches_grant BEFORE INSERT ON grant_allocat
  WHEN NEW.currency<>(SELECT currency FROM grants WHERE id=NEW.grant_id)
  BEGIN SELECT RAISE(ABORT,'allocation currency must match grant'); END;
 CREATE TABLE api_keys (
- id TEXT PRIMARY KEY, allocation_id TEXT NOT NULL REFERENCES grant_allocations(id), name TEXT NOT NULL,
+ seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, allocation_id TEXT NOT NULL REFERENCES grant_allocations(id), name TEXT NOT NULL,
  prefix TEXT NOT NULL, secret_hash BLOB NOT NULL UNIQUE CHECK(length(secret_hash)=32),
  created_at_ms INTEGER NOT NULL, last_used_at_ms INTEGER, revoked_at_ms INTEGER,
  UNIQUE(id, allocation_id)
 ) STRICT;
 CREATE INDEX keys_allocation ON api_keys(allocation_id);
 CREATE TABLE payment_sessions (
- id TEXT PRIMARY KEY, allocation_id TEXT NOT NULL REFERENCES grant_allocations(id), api_key_id TEXT NOT NULL,
+ seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, allocation_id TEXT NOT NULL REFERENCES grant_allocations(id), api_key_id TEXT NOT NULL,
  state_id TEXT NOT NULL UNIQUE, app TEXT NOT NULL, payment_type TEXT NOT NULL,
  orchestrator TEXT NOT NULL CHECK(length(orchestrator)=42 AND substr(orchestrator,1,2)='0x' AND substr(orchestrator,3) NOT GLOB '*[^0-9a-f]*'),
  status TEXT NOT NULL CHECK(status IN ('active','revoked')), created_at_ms INTEGER NOT NULL, last_seen_at_ms INTEGER NOT NULL,
@@ -41,13 +41,14 @@ CREATE TABLE payment_sessions (
 ) STRICT;
 CREATE INDEX sessions_allocation ON payment_sessions(allocation_id);
 CREATE TABLE usage_events (
- id TEXT PRIMARY KEY, event_id TEXT UNIQUE, topic TEXT NOT NULL, partition INTEGER NOT NULL CHECK(partition>=0 AND partition<=2147483647), offset INTEGER NOT NULL CHECK(offset>=0),
+ seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, event_id TEXT UNIQUE, topic TEXT NOT NULL, partition INTEGER NOT NULL CHECK(partition>=0 AND partition<=2147483647), offset INTEGER NOT NULL CHECK(offset>=0),
  raw_payload BLOB NOT NULL, payment_session_id TEXT REFERENCES payment_sessions(id),
  pipeline TEXT, request_id TEXT, started_at_ms INTEGER, ended_at_ms INTEGER, billable_seconds TEXT, pixels TEXT, computed_fee_wei TEXT, computed_fee_usd TEXT,
  status TEXT NOT NULL CHECK(status IN ('applied','quarantined','ignored','duplicate')), error TEXT NOT NULL DEFAULT '', created_at_ms INTEGER NOT NULL,
  UNIQUE(topic, partition, offset)
 ) STRICT;
 CREATE INDEX usage_status ON usage_events(status,created_at_ms);
+CREATE INDEX usage_session ON usage_events(payment_session_id) WHERE payment_session_id IS NOT NULL;
 CREATE TABLE signing_authorizations (
  id TEXT PRIMARY KEY, usage_event_id TEXT NOT NULL UNIQUE REFERENCES usage_events(id), payment_session_id TEXT NOT NULL REFERENCES payment_sessions(id),
  request_id TEXT NOT NULL, sequence_number TEXT NOT NULL CHECK(sequence_number<>'' AND sequence_number NOT GLOB '*[^0-9]*' AND (sequence_number='0' OR substr(sequence_number,1,1)<>'0')),
@@ -83,12 +84,13 @@ CREATE TABLE account_balances (
  ),
  PRIMARY KEY(account_type,account_id,currency)
 ) STRICT;
+CREATE INDEX balances_owner ON account_balances(account_id,account_type,currency);
 CREATE TRIGGER ledger_entries_no_update BEFORE UPDATE ON ledger_entries BEGIN SELECT RAISE(ABORT,'ledger is append-only'); END;
 CREATE TRIGGER ledger_entries_no_delete BEFORE DELETE ON ledger_entries BEGIN SELECT RAISE(ABORT,'ledger is append-only'); END;
 CREATE TRIGGER ledger_transactions_no_update BEFORE UPDATE ON ledger_transactions BEGIN SELECT RAISE(ABORT,'ledger is append-only'); END;
 CREATE TRIGGER ledger_transactions_no_delete BEFORE DELETE ON ledger_transactions BEGIN SELECT RAISE(ABORT,'ledger is append-only'); END;
 CREATE TABLE settlements (
- id TEXT PRIMARY KEY, chain_id TEXT NOT NULL CHECK(chain_id<>'' AND chain_id NOT GLOB '*[^0-9]*' AND substr(chain_id,1,1) BETWEEN '1' AND '9'),
+ seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, chain_id TEXT NOT NULL CHECK(chain_id<>'' AND chain_id NOT GLOB '*[^0-9]*' AND substr(chain_id,1,1) BETWEEN '1' AND '9'),
  contract_address TEXT NOT NULL CHECK(length(contract_address)=42 AND substr(contract_address,1,2)='0x' AND substr(contract_address,3) NOT GLOB '*[^0-9a-f]*'),
  tx_hash TEXT NOT NULL CHECK(length(tx_hash)=66 AND substr(tx_hash,1,2)='0x' AND substr(tx_hash,3) NOT GLOB '*[^0-9a-f]*'),
  log_index INTEGER NOT NULL CHECK(log_index>=0), block_number INTEGER NOT NULL CHECK(block_number>=0),
@@ -114,6 +116,7 @@ CREATE TABLE settlements (
 ) STRICT;
 CREATE INDEX settlements_match ON settlements(pm_session_id,recipient);
 CREATE INDEX settlements_block ON settlements(chain_id,contract_address,block_number);
+CREATE INDEX settlements_session ON settlements(payment_session_id) WHERE payment_session_id IS NOT NULL;
 CREATE TABLE escrow_snapshots (
  id TEXT PRIMARY KEY, stream TEXT NOT NULL, chain_id TEXT NOT NULL CHECK(chain_id<>'' AND chain_id NOT GLOB '*[^0-9]*' AND substr(chain_id,1,1) BETWEEN '1' AND '9'),
  contract_address TEXT NOT NULL CHECK(length(contract_address)=42 AND substr(contract_address,1,2)='0x' AND substr(contract_address,3) NOT GLOB '*[^0-9a-f]*'),

@@ -70,7 +70,8 @@ func TestManagementRoutes(t *testing.T) {
 	require.Equal(t, "1.000000000000000001", row["total_eth"])
 	require.Equal(t, "not JSON: {bad}", row["metadata"])
 	require.NotContains(t, row, "total_wei")
-	require.Len(t, managementArray(t, managementRequest(t, handler, "GET", "/v1/grants", "", ""), 200), 2)
+	items, _ := managementPage(t, managementRequest(t, handler, "GET", "/v1/grants", "", ""), 200)
+	require.Len(t, items, 2)
 
 	contentType, form := managementForm(t, map[string]string{"grant_id": grantID, "name": "HTTP allocation", "amount_eth": "0.5", "metadata": "opaque allocation\n{bad"})
 	allocation := managementObject(t, managementRequest(t, handler, "POST", "/v1/allocations", contentType, form), 201)
@@ -78,7 +79,8 @@ func TestManagementRoutes(t *testing.T) {
 	row = managementObject(t, managementRequest(t, handler, "GET", "/v1/allocations/"+allocationID, "", ""), 200)
 	require.Equal(t, "0.5", row["allocated_eth"])
 	require.Equal(t, "opaque allocation\n{bad", row["metadata"])
-	require.Len(t, managementArray(t, managementRequest(t, handler, "GET", "/v1/allocations", "", ""), 200), 2)
+	items, _ = managementPage(t, managementRequest(t, handler, "GET", "/v1/allocations", "", ""), 200)
+	require.Len(t, items, 2)
 	require.Equal(t, "", managementObject(t, managementRequest(t, handler, "GET", "/v1/grants/"+f.Grant, "", ""), 200)["metadata"])
 	require.Equal(t, "", managementObject(t, managementRequest(t, handler, "GET", "/v1/allocations/"+f.Allocation, "", ""), 200)["metadata"])
 
@@ -104,7 +106,8 @@ func TestManagementRoutes(t *testing.T) {
 	require.NotEmpty(t, keyForGrant["allocation_id"])
 	managementObject(t, managementRequest(t, handler, "POST", "/v1/api-keys/"+createdKey["id"].(string)+"/revoke", "", ""), 200)
 
-	require.NotEmpty(t, managementArray(t, managementRequest(t, handler, "GET", "/v1/sessions", "", ""), 200))
+	items, _ = managementPage(t, managementRequest(t, handler, "GET", "/v1/sessions", "", ""), 200)
+	require.NotEmpty(t, items)
 	require.Equal(t, f.Session, managementObject(t, managementRequest(t, handler, "GET", "/v1/sessions/"+f.Session, "", ""), 200)["id"])
 	require.NoError(t, f.DB.Ingest(context.Background(), "test", 0, 0, f.Event(t, "http-usage", "7", testutil.PM)))
 	managementObject(t, managementRequest(t, handler, "POST", "/v1/sessions/"+f.Session+"/revoke", "", ""), 200)
@@ -112,7 +115,10 @@ func TestManagementRoutes(t *testing.T) {
 
 	stream := "42161:" + testutil.Contract + ":" + testutil.Sender
 	require.NoError(t, f.DB.BootstrapChain(context.Background(), stream, store.Block{Number: -1}, []store.EscrowSnapshot{{ChainID: "42161", Contract: testutil.Contract, Sender: testutil.Sender, Deposit: "12", Reserve: "3"}}))
-	for _, path := range []string{"/v1/settlements", "/v1/usage", "/v1/ledger/report", "/v1/escrow/report", "/v1/escrow/activity"} {
+	for _, path := range []string{"/v1/settlements", "/v1/usage"} {
+		managementPage(t, managementRequest(t, handler, "GET", path, "", ""), 200)
+	}
+	for _, path := range []string{"/v1/ledger/report", "/v1/escrow/report", "/v1/escrow/activity"} {
 		managementArray(t, managementRequest(t, handler, "GET", path, "", ""), 200)
 	}
 	require.Contains(t, managementRequest(t, handler, "GET", "/v1/usage", "", "").Body.String(), `"computed_fee_eth":"0.000000000000000007"`)
@@ -171,6 +177,25 @@ func TestAPIKeyItemRoute(t *testing.T) {
 
 	missing := managementObject(t, managementRequest(t, handler, "GET", "/v1/api-keys/missing", "", ""), http.StatusNotFound)
 	require.Equal(t, map[string]any{"error": "resource not found"}, missing)
+}
+
+func managementPage(t *testing.T, response *httptest.ResponseRecorder, status int) ([]map[string]any, string) {
+	t.Helper()
+	value := managementObject(t, response, status)
+	require.Len(t, value, 2)
+	items, ok := value["items"].([]any)
+	require.True(t, ok, "items must be an array")
+	rows := make([]map[string]any, len(items))
+	for i, item := range items {
+		rows[i], ok = item.(map[string]any)
+		require.True(t, ok)
+		require.NotContains(t, rows[i], "seq")
+		require.NotContains(t, rows[i], "secret_hash")
+		require.NotContains(t, rows[i], "raw_payload")
+	}
+	next, ok := value["next_cursor"].(string)
+	require.True(t, ok, "next_cursor must be a string")
+	return rows, next
 }
 
 func managementArray(t *testing.T, response *httptest.ResponseRecorder, status int) []any {

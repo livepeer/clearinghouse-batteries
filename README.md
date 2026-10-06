@@ -1,21 +1,24 @@
 # Livepeer grants clearinghouse
 
-The clearinghouse manages grants, allocations, and gateway API keys for Livepeer
-remote signing. It accounts for issued tickets and on-chain payments in SQLite.
+The clearinghouse manages grants, usage accounting, and API keys for Livepeer
+network payments. It tracks account usage and balances, issued tickets, and network
+settlement.
 
 ## How accounting works
 
-Grants provide budgets; allocations divide them among gateways. Each gateway
-uses an allocation's API key to request signing authorization. The signer logs
-issued tickets to Kafka, and the accounting service validates and charges them.
-The authorization webhook checks the allocation's available balance.
+Grants provide usage credits. Allocations define budgets within a grant, and
+each allocation can have multiple API keys. Payers (Livepeer gateways or remote
+signers) use these keys to authorize network payments.
+
+The clearinghouse authorization webhook checks the API key and the allocation's
+available balance. Payers log issued tickets to Kafka, and the accounting service
+validates those events and charges the allocation for usage.
 
 Authorization does not reserve funds. Delayed accounting can take an allocation
 negative before signing stops. Monitor accounting lag and quarantined events.
 
 The optional on-chain listener records payments and escrow (deposit + reserve)
-activity and matches settlements to signing sessions without charging grants
-again.
+activity. It matches settlements to sessions but does not charge for usage again.
 
 ## Quick start
 
@@ -266,8 +269,8 @@ by `--db-path`.
 Amounts use `--amount-usd` or `--amount-eth` (`amount_usd` / `amount_eth` in the
 API): exact decimals with up to 18 fractional digits. New grants default to
 USD $0 if the amount is omitted. Allocations inherit their grant's currency.
-Allocation creation and funding
-accept `all`. JSON amounts are decimal `*_usd` or `*_eth` strings.
+Allocation creation and funding accept `all`. JSON amounts are decimal `*_usd`
+or `*_eth` strings.
 
 Allocation API and CLI reads include `available_usd`/`spent_usd` (or `_eth`
 equivalents), defaulting to `"0"` if empty. Available is the remaining balance
@@ -344,17 +347,37 @@ curl -H 'Livepeer-Clearinghouse-Token: OPERATOR_SECRET' \
 
 Responses use the CLI's JSON fields and types, including decimal amount strings,
 millisecond timestamps, and string `metadata`. Item routes return one object;
-lists return arrays and have no pagination. New API-key secrets are returned once.
-Migrations are CLI-only.
+lists return paged objects with `items` and `next_cursor`. Ledger and escrow
+reports return arrays. New API-key secrets are returned once. Migrations are
+CLI-only.
 
 ```sh
 curl -H 'Livepeer-Clearinghouse-Token: OPERATOR_SECRET' \
-  'https://management.clearinghouse.example.com/v1/allocations?grant_id=GRANT_ID'
+  'https://management.clearinghouse.example.com/v1/allocations?grant_id=GRANT_ID&limit=100'
 
 curl -H 'Livepeer-Clearinghouse-Token: OPERATOR_SECRET' \
   'https://management.clearinghouse.example.com/v1/sessions?grant_id=GRANT_ID&allocation_id=ALLOCATION_ID'
 ```
 
+List endpoints accept `limit` (default 100, minimum 1, maximum 1,000) and an
+opaque `cursor`. Results are returned in insertion order, regardless of
+timestamps or IDs. Internal sequence numbers are excluded from item JSON. A
+response has this shape:
+
+```json
+{"items": [], "next_cursor": ""}
+```
+
+When `next_cursor` is nonempty, pass it as `cursor` to fetch the next page:
+
+```sh
+curl -H 'Livepeer-Clearinghouse-Token: OPERATOR_SECRET' \
+  'https://management.clearinghouse.example.com/v1/allocations?grant_id=GRANT_ID&limit=100&cursor=NEXT_CURSOR'
+```
+
+An empty `next_cursor` means there are no more items. Pagination reads live data,
+so later inserts may appear in subsequent pages and ownership changes may affect
+filtered results.
 
 Missing or invalid credentials, or credentials for another service, return `401`.
 Malformed queries, unknown parameters, repeated parameters and empty values
@@ -376,14 +399,14 @@ Resource list routes allow only the following query parameters:
 
 | List route | Allowed query parameters |
 | --- | --- |
-| `/v1/grants` | None |
-| `/v1/allocations` | `grant_id` |
-| `/v1/api-keys`, `/v1/sessions`, `/v1/usage`, `/v1/settlements` | `grant_id`, `allocation_id` |
+| `/v1/grants` | `limit`, `cursor` |
+| `/v1/allocations` | `grant_id`, `limit`, `cursor` |
+| `/v1/api-keys`, `/v1/sessions`, `/v1/usage`, `/v1/settlements` | `grant_id`, `allocation_id`, `limit`, `cursor` |
 
 Filters match IDs exactly. When both filters are supplied, results must match
 both. Unknown IDs or an allocation that does not belong to the specified grant
-return `200` with `[]`. Usage and settlements without an associated session
-appear only in unfiltered lists.
+return `200` with `{"items":[],"next_cursor":""}`. Usage and settlements without
+an associated session appear only in unfiltered lists.
 
 ## Development
 
