@@ -193,6 +193,7 @@ func TestManagementErrors(t *testing.T) {
 		status                          int
 	}{
 		{"GET", "/v1/grants/missing", "", "", 404},
+		{"GET", "/v1/allocations/missing", "", "", 404},
 		{"POST", "/v1/allocations", "application/json", `{"name":"missing","grant_id":"missing","amount_eth":"1"}`, 404},
 		{"POST", "/v1/allocations", "application/json", fmt.Sprintf(`{"name":"too much","grant_id":%q,"amount_eth":"1"}`, f.Grant), 409},
 		{"POST", "/v1/grants", "application/json", `{"name":"bad","amount_eth":"1e2"}`, 400},

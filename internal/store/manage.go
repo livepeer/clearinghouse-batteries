@@ -383,7 +383,11 @@ func insertKey(ctx context.Context, tx *sql.Tx, allocation string, record keyRec
 
 func (s *Store) List(ctx context.Context, kind, id string) ([]map[string]any, error) {
 	queries := map[string]string{
-		"grant": `SELECT * FROM grants`, "allocation": `SELECT * FROM grant_allocations`,
+		"grant": `SELECT * FROM grants`,
+		"allocation": `SELECT a.*,coalesce(available.balance_units,'0') AS available_units,coalesce(spent.balance_units,'0') AS spent_units
+ FROM grant_allocations a
+ LEFT JOIN account_balances available ON available.account_type='allocation_available' AND available.account_id=a.id AND available.currency=a.currency
+ LEFT JOIN account_balances spent ON spent.account_type='allocation_spent' AND spent.account_id=a.id AND spent.currency=a.currency`,
 		"api-key": `SELECT id,allocation_id,name,prefix,created_at_ms,last_used_at_ms,revoked_at_ms FROM api_keys`,
 		"session": `SELECT * FROM payment_sessions`, "settlement": `SELECT * FROM settlements`,
 		"usage": `SELECT id,event_id,topic,partition,offset,status,error,computed_fee_wei,computed_fee_usd,created_at_ms,
@@ -394,12 +398,16 @@ func (s *Store) List(ctx context.Context, kind, id string) ([]map[string]any, er
 	if !ok {
 		return nil, fmt.Errorf("unknown resource %q", kind)
 	}
+	prefix := ""
+	if kind == "allocation" {
+		prefix = "a."
+	}
 	args := []any{}
 	if id != "" {
-		q += " WHERE id=?"
+		q += " WHERE " + prefix + "id=?"
 		args = append(args, id)
 	}
-	q += " ORDER BY created_at_ms,id"
+	q += " ORDER BY " + prefix + "created_at_ms," + prefix + "id"
 	rows, err := s.Rows(ctx, q, args...)
 	if err == nil && id != "" && len(rows) == 0 {
 		return nil, sql.ErrNoRows
