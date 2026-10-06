@@ -47,7 +47,7 @@ Use the returned grant ID to create an allocation and API key:
 ```
 
 The response includes `allocation_id`, key `id`, and `api_key`. Store the key;
-its secret is shown only once.
+the CLI will not show its secret again.
 
 Copy [`creds.example.toml`](creds.example.toml), replace each empty secret with a
 distinct random value, and restrict file access to the clearinghouse process.
@@ -341,6 +341,7 @@ curl -H 'Livepeer-Clearinghouse-Token: OPERATOR_SECRET' \
 
 curl -H 'Livepeer-Clearinghouse-Token: OPERATOR_SECRET' \
   -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: REQUEST_KEY' \
   -d '{"grant_id":"GRANT_ID","name":"gateway","amount_usd":"25"}' \
   https://management.clearinghouse.example.com/v1/api-keys
 ```
@@ -348,8 +349,8 @@ curl -H 'Livepeer-Clearinghouse-Token: OPERATOR_SECRET' \
 Responses use the CLI's JSON fields and types, including decimal amount strings,
 millisecond timestamps, and string `metadata`. Item routes return one object;
 lists return paged objects with `items` and `next_cursor`. Ledger and escrow
-reports return arrays. New API-key secrets are returned once. Migrations are
-CLI-only.
+reports return arrays. New API-key secrets are returned on creation and matching
+idempotent retries. Migrations are CLI-only.
 
 ```sh
 curl -H 'Livepeer-Clearinghouse-Token: OPERATOR_SECRET' \
@@ -393,7 +394,7 @@ resource handlers also use JSON `error` strings:
 | --- | --- |
 | `400` | Invalid input. |
 | `404` | Missing resource. |
-| `409` | State or balance conflict. |
+| `409` | State, balance, or idempotency conflict. |
 | `413` | Body exceeds 1 MiB. |
 | `415` | Unsupported or missing content type. |
 | `500` | Unexpected failure. |
@@ -411,6 +412,28 @@ Filters match IDs exactly. Results must match every supplied filter. Unknown IDs
 or an allocation that does not belong to the specified grant return `200` with
 `{"items":[],"next_cursor":""}`. Usage and settlements without
 an associated session appear only in unfiltered lists.
+
+#### Idempotent API Calls
+
+Allocation and API-key creation, and grant and allocation funding, accept an
+optional `Idempotency-Key` header. Choose a new random value for each operation
+and keep it for retries. The key can be 256 characters long using the base64url
+alphabet of `A-Z`, `a-z`, `0-9`, `_`, `-`, or `=`. Keys are case-sensitive;
+invalid headers return `400`.
+
+Idempotency keys are shared across these operations and all callers within a grant.
+Different grants may reuse a key. Matching retries return the original HTTP
+status and JSON response. Reusing a key with a different operation, target, or
+body returns `409`. Matching uses decoded strings: `"1"` and `"\u0031"` match,
+but `"1"` and `"1.0"` differ. JSON field order and body format do not matter;
+adding an empty or default field counts as a change. Form values must be valid UTF-8.
+
+Successful responses survive restarts and currently do not expire. Retries after
+closure or revocation still return the original response, including any API-key
+secret, without restoring access or moving funds again. Errors are not saved.
+Retries are still validated and require the same permissions as new requests.
+Saved API-key responses contain unencrypted secrets; protect the database and
+backups as described in [SECURITY.md](SECURITY.md).
 
 ## Development
 

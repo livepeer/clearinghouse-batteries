@@ -148,6 +148,12 @@ func (s *Store) Fund(ctx context.Context, kind, id, value string) error {
 }
 
 func (s *Store) FundCurrency(ctx context.Context, kind, id, value, currency string) error {
+	return s.Write(ctx, func(tx *sql.Tx) error {
+		return fundCurrency(ctx, tx, kind, id, value, currency)
+	})
+}
+
+func fundCurrency(ctx context.Context, tx *sql.Tx, kind, id, value, currency string) error {
 	if kind == "grant" {
 		n, err := Amount(value)
 		if err != nil {
@@ -156,85 +162,81 @@ func (s *Store) FundCurrency(ctx context.Context, kind, id, value, currency stri
 		if n.Sign() == 0 {
 			return invalidInput("funding must be positive")
 		}
-		return s.fundGrant(ctx, id, n, currency)
+		return fundGrant(ctx, tx, id, n, currency)
 	}
 	if kind != "allocation" {
 		return errors.New("unknown resource")
 	}
-	return s.Write(ctx, func(tx *sql.Tx) error {
-		var old, status, grant, actualCurrency string
-		if err := tx.QueryRowContext(ctx, `SELECT allocated_units,status,grant_id,currency FROM grant_allocations WHERE id=?`, id).Scan(&old, &status, &grant, &actualCurrency); err != nil {
-			return err
-		}
-		if currency != "" && currency != actualCurrency {
-			return invalidInput("funding currency must match allocation currency")
-		}
-		if status == "revoked" {
-			return stateConflict("allocation is revoked")
-		}
-		var gs string
-		if err := tx.QueryRowContext(ctx, `SELECT status FROM grants WHERE id=?`, grant).Scan(&gs); err != nil {
-			return err
-		}
-		if gs == "closed" {
-			return stateConflict("grant is closed")
-		}
-		available, err := BalanceCurrency(ctx, tx, "grant_unallocated", grant, actualCurrency)
-		if err != nil {
-			return err
-		}
-		n, err := allocationAmount(value, available)
-		if err != nil {
-			return err
-		}
-		if n.Sign() == 0 {
-			return invalidInput("funding must be positive")
-		}
-		if available.Cmp(n) < 0 {
-			return stateConflict("insufficient unallocated grant balance")
-		}
-		total, err := Amount(old)
-		if err != nil {
-			return err
-		}
-		total.Add(total, n)
-		if err := TransferCurrency(ctx, tx, "fund:"+ID(), "allocation funding", "allocation", id, "grant_unallocated", grant, "allocation_available", id, actualCurrency, n); err != nil {
-			return err
-		}
-		bal, err := BalanceCurrency(ctx, tx, "allocation_available", id, actualCurrency)
-		if err != nil {
-			return err
-		}
-		if status == "exhausted" && bal.Sign() > 0 {
-			status = "active"
-		}
-		_, err = tx.ExecContext(ctx, `UPDATE grant_allocations SET allocated_units=?,status=? WHERE id=?`, total.String(), status, id)
+	var old, status, grant, actualCurrency string
+	if err := tx.QueryRowContext(ctx, `SELECT allocated_units,status,grant_id,currency FROM grant_allocations WHERE id=?`, id).Scan(&old, &status, &grant, &actualCurrency); err != nil {
 		return err
-	})
+	}
+	if currency != "" && currency != actualCurrency {
+		return invalidInput("funding currency must match allocation currency")
+	}
+	if status == "revoked" {
+		return stateConflict("allocation is revoked")
+	}
+	var gs string
+	if err := tx.QueryRowContext(ctx, `SELECT status FROM grants WHERE id=?`, grant).Scan(&gs); err != nil {
+		return err
+	}
+	if gs == "closed" {
+		return stateConflict("grant is closed")
+	}
+	available, err := BalanceCurrency(ctx, tx, "grant_unallocated", grant, actualCurrency)
+	if err != nil {
+		return err
+	}
+	n, err := allocationAmount(value, available)
+	if err != nil {
+		return err
+	}
+	if n.Sign() == 0 {
+		return invalidInput("funding must be positive")
+	}
+	if available.Cmp(n) < 0 {
+		return stateConflict("insufficient unallocated grant balance")
+	}
+	total, err := Amount(old)
+	if err != nil {
+		return err
+	}
+	total.Add(total, n)
+	if err := TransferCurrency(ctx, tx, "fund:"+ID(), "allocation funding", "allocation", id, "grant_unallocated", grant, "allocation_available", id, actualCurrency, n); err != nil {
+		return err
+	}
+	bal, err := BalanceCurrency(ctx, tx, "allocation_available", id, actualCurrency)
+	if err != nil {
+		return err
+	}
+	if status == "exhausted" && bal.Sign() > 0 {
+		status = "active"
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE grant_allocations SET allocated_units=?,status=? WHERE id=?`, total.String(), status, id)
+	return err
 }
 
-func (s *Store) fundGrant(ctx context.Context, id string, n *big.Int, currency string) error {
-	return s.Write(ctx, func(tx *sql.Tx) error {
-		var old, status, actualCurrency string
-		if err := tx.QueryRowContext(ctx, `SELECT total_units,status,currency FROM grants WHERE id=?`, id).Scan(&old, &status, &actualCurrency); err != nil {
-			return err
-		}
-		if currency != "" && currency != actualCurrency {
-			return invalidInput("funding currency must match grant currency")
-		}
-		if status == "closed" {
-			return stateConflict("grant is closed")
-		}
-		total, err := Amount(old)
-		if err != nil {
-			return err
-		}
-		total.Add(total, n)
-		if _, err := tx.ExecContext(ctx, `UPDATE grants SET total_units=? WHERE id=?`, total.String(), id); err != nil {
-			return err
-		}
-		return TransferCurrency(ctx, tx, "fund:"+ID(), "grant funding", "grant", id, "grant_funding_source", id, "grant_unallocated", id, actualCurrency, n)
-	})
+func fundGrant(ctx context.Context, tx *sql.Tx, id string, n *big.Int, currency string) error {
+	var old, status, actualCurrency string
+	if err := tx.QueryRowContext(ctx, `SELECT total_units,status,currency FROM grants WHERE id=?`, id).Scan(&old, &status, &actualCurrency); err != nil {
+		return err
+	}
+	if currency != "" && currency != actualCurrency {
+		return invalidInput("funding currency must match grant currency")
+	}
+	if status == "closed" {
+		return stateConflict("grant is closed")
+	}
+	total, err := Amount(old)
+	if err != nil {
+		return err
+	}
+	total.Add(total, n)
+	if _, err := tx.ExecContext(ctx, `UPDATE grants SET total_units=? WHERE id=?`, total.String(), id); err != nil {
+		return err
+	}
+	return TransferCurrency(ctx, tx, "fund:"+ID(), "grant funding", "grant", id, "grant_funding_source", id, "grant_unallocated", id, actualCurrency, n)
 }
 
 func (s *Store) SetStatus(ctx context.Context, kind, id, status string) error {
@@ -324,14 +326,21 @@ func (s *Store) CreateKey(ctx context.Context, allocation, name string) (string,
 	if strings.TrimSpace(name) == "" {
 		return "", "", invalidInput("name is required")
 	}
+	var id, key string
+	err := s.Write(ctx, func(tx *sql.Tx) error {
+		var err error
+		id, key, err = createKey(ctx, tx, allocation, name)
+		return err
+	})
+	return id, key, err
+}
+
+func createKey(ctx context.Context, tx *sql.Tx, allocation, name string) (string, string, error) {
 	record, err := newKeyRecord(name)
 	if err != nil {
 		return "", "", err
 	}
-	err = s.Write(ctx, func(tx *sql.Tx) error {
-		return insertKey(ctx, tx, allocation, record)
-	})
-	return record.id, record.key, err
+	return record.id, record.key, insertKey(ctx, tx, allocation, record)
 }
 
 // CreateKeyForGrant atomically creates a default allocation and an API key for it.
@@ -344,20 +353,22 @@ func (s *Store) CreateKeyForGrantCurrency(ctx context.Context, grant, name, amou
 	if err := prepareCreate(&p); err != nil {
 		return "", "", "", err
 	}
-	record, err := newKeyRecord(name)
+	var allocation, id, key string
+	err := s.Write(ctx, func(tx *sql.Tx) error {
+		var err error
+		allocation, id, key, err = createKeyForGrant(ctx, tx, p)
+		return err
+	})
+	return allocation, id, key, err
+}
+
+func createKeyForGrant(ctx context.Context, tx *sql.Tx, p Create) (string, string, string, error) {
+	allocation, err := createAllocation(ctx, tx, p)
 	if err != nil {
 		return "", "", "", err
 	}
-	var allocation string
-	err = s.Write(ctx, func(tx *sql.Tx) error {
-		var err error
-		allocation, err = createAllocation(ctx, tx, p)
-		if err != nil {
-			return err
-		}
-		return insertKey(ctx, tx, allocation, record)
-	})
-	return allocation, record.id, record.key, err
+	id, key, err := createKey(ctx, tx, allocation, p.Name)
+	return allocation, id, key, err
 }
 
 type keyRecord struct {
