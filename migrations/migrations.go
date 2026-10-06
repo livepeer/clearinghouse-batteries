@@ -1,4 +1,4 @@
-// Package migrations applies embedded, versioned SQL files in the repository's UP/DOWN format.
+// Package migrations applies embedded SQL files using the repository's UP/DOWN format.
 package migrations
 
 import (
@@ -8,19 +8,19 @@ import (
 	"embed"
 	"encoding/hex"
 	"fmt"
+	"io/fs"
 	"regexp"
-	"sort"
-	"strconv"
 	"strings"
 )
 
 //go:embed *.sql
-var files embed.FS
+var embeddedFiles embed.FS
 
-var migrationName = regexp.MustCompile(`^([0-9]{3,})_[a-z0-9_]+\.sql$`)
+var files fs.FS = embeddedFiles
+
+var migrationName = regexp.MustCompile(`^[0-9]{3,}_[a-z0-9_]+\.sql$`)
 
 type Status struct {
-	Version     int    `json:"version"`
 	Filename    string `json:"filename"`
 	SHA256      string `json:"sha256"`
 	AppliedAtMS *int64 `json:"applied_at_ms"`
@@ -34,8 +34,7 @@ type migration struct {
 
 func initTable(ctx context.Context, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS migrations (
- version INTEGER PRIMARY KEY CHECK(version > 0),
- filename TEXT NOT NULL UNIQUE,
+ filename TEXT NOT NULL PRIMARY KEY,
  sha256 TEXT NOT NULL CHECK(length(sha256)=64 AND sha256 NOT GLOB '*[^0-9a-f]*'),
  applied_at_ms INTEGER NOT NULL
 ) STRICT`)
@@ -43,7 +42,8 @@ func initTable(ctx context.Context, db *sql.DB) error {
 }
 
 func catalog() ([]migration, error) {
-	entries, err := files.ReadDir(".")
+	// ReadDir returns entries in lexical filename order.
+	entries, err := fs.ReadDir(files, ".")
 	if err != nil {
 		return nil, err
 	}
@@ -52,15 +52,10 @@ func catalog() ([]migration, error) {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
 			continue
 		}
-		matches := migrationName.FindStringSubmatch(entry.Name())
-		if matches == nil {
+		if !migrationName.MatchString(entry.Name()) {
 			return nil, fmt.Errorf("invalid migration filename %s", entry.Name())
 		}
-		version, err := strconv.Atoi(matches[1])
-		if err != nil || version <= 0 {
-			return nil, fmt.Errorf("invalid migration version in %s", entry.Name())
-		}
-		contents, err := files.ReadFile(entry.Name())
+		contents, err := fs.ReadFile(files, entry.Name())
 		if err != nil {
 			return nil, err
 		}
@@ -69,13 +64,7 @@ func catalog() ([]migration, error) {
 			return nil, err
 		}
 		hash := sha256.Sum256(contents)
-		out = append(out, migration{Status: Status{Version: version, Filename: entry.Name(), SHA256: hex.EncodeToString(hash[:])}, up: up, down: down})
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Version < out[j].Version })
-	for i, item := range out {
-		if item.Version != i+1 {
-			return nil, fmt.Errorf("migration versions must be contiguous from 1: found %d at %s", item.Version, item.Filename)
-		}
+		out = append(out, migration{Status: Status{Filename: entry.Name(), SHA256: hex.EncodeToString(hash[:])}, up: up, down: down})
 	}
 	return out, nil
 }
@@ -96,34 +85,35 @@ func List(ctx context.Context, db *sql.DB) ([]Status, error) {
 		}
 		return out, nil
 	}
-	rows, err := db.QueryContext(ctx, `SELECT version,filename,sha256,applied_at_ms FROM migrations ORDER BY version`)
+	known := make(map[string]Status, len(specs))
+	for _, item := range specs {
+		known[item.Filename] = item.Status
+	}
+	rows, err := db.QueryContext(ctx, `SELECT filename,sha256,applied_at_ms FROM migrations ORDER BY filename`)
 	if err != nil {
 		return nil, fmt.Errorf("read migration metadata: %w", err)
 	}
 	defer rows.Close()
-	applied := map[int]Status{}
+	applied := map[string]Status{}
 	for rows.Next() {
 		var saved Status
 		var appliedAt int64
-		if err := rows.Scan(&saved.Version, &saved.Filename, &saved.SHA256, &appliedAt); err != nil {
+		if err := rows.Scan(&saved.Filename, &saved.SHA256, &appliedAt); err != nil {
 			return nil, err
 		}
 		saved.AppliedAtMS = &appliedAt
 		saved.Applied = true
-		if saved.Version < 1 || saved.Version > len(specs) {
-			return nil, fmt.Errorf("database has unknown migration version %d (%s)", saved.Version, saved.Filename)
-		}
-		expected := specs[saved.Version-1].Status
-		if saved.Filename != expected.Filename {
-			return nil, fmt.Errorf("migration version %d filename mismatch: database has %s, application expects %s", saved.Version, saved.Filename, expected.Filename)
+		expected, ok := known[saved.Filename]
+		if !ok {
+			return nil, fmt.Errorf("database has unknown migration %s", saved.Filename)
 		}
 		if saved.SHA256 != expected.SHA256 {
 			return nil, fmt.Errorf("migration %s checksum mismatch", saved.Filename)
 		}
-		if _, duplicate := applied[saved.Version]; duplicate {
-			return nil, fmt.Errorf("duplicate migration version %d", saved.Version)
+		if _, duplicate := applied[saved.Filename]; duplicate {
+			return nil, fmt.Errorf("duplicate migration %s", saved.Filename)
 		}
-		applied[saved.Version] = saved
+		applied[saved.Filename] = saved
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -132,14 +122,14 @@ func List(ctx context.Context, db *sql.DB) ([]Status, error) {
 	out := make([]Status, len(specs))
 	for i := range specs {
 		out[i] = specs[i].Status
-		if saved, ok := applied[out[i].Version]; ok {
+		if saved, ok := applied[out[i].Filename]; ok {
 			out[i].Applied = true
 			out[i].AppliedAtMS = saved.AppliedAtMS
 		}
 		if !out[i].Applied {
 			missing = true
 		} else if missing {
-			return nil, fmt.Errorf("database migration history has a gap before version %d", out[i].Version)
+			return nil, fmt.Errorf("database migration history has a gap before %s", out[i].Filename)
 		}
 	}
 	return out, nil
@@ -204,7 +194,7 @@ func apply(ctx context.Context, db *sql.DB, item migration, down bool) error {
 	}
 	defer tx.Rollback()
 	var present int
-	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM migrations WHERE version=?`, item.Version).Scan(&present); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM migrations WHERE filename=?`, item.Filename).Scan(&present); err != nil {
 		return err
 	}
 	if (!down && present != 0) || (down && present == 0) {
@@ -218,9 +208,9 @@ func apply(ctx context.Context, db *sql.DB, item migration, down bool) error {
 		return fmt.Errorf("migration %s: %w", item.Filename, err)
 	}
 	if down {
-		_, err = tx.ExecContext(ctx, `DELETE FROM migrations WHERE version=?`, item.Version)
+		_, err = tx.ExecContext(ctx, `DELETE FROM migrations WHERE filename=?`, item.Filename)
 	} else {
-		_, err = tx.ExecContext(ctx, `INSERT INTO migrations(version,filename,sha256,applied_at_ms) VALUES (?,?,?,CAST(unixepoch('subsec')*1000 AS INTEGER))`, item.Version, item.Filename, item.SHA256)
+		_, err = tx.ExecContext(ctx, `INSERT INTO migrations(filename,sha256,applied_at_ms) VALUES (?,?,CAST(unixepoch('subsec')*1000 AS INTEGER))`, item.Filename, item.SHA256)
 	}
 	if err != nil {
 		return err

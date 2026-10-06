@@ -22,6 +22,7 @@ import (
 	"github.com/livepeer/clearinghouse/internal/kafka"
 	"github.com/livepeer/clearinghouse/internal/store"
 	"github.com/livepeer/clearinghouse/internal/testutil"
+	"github.com/livepeer/clearinghouse/migrations"
 	kgo "github.com/segmentio/kafka-go"
 	"github.com/segmentio/kafka-go/sasl/plain"
 	"github.com/stretchr/testify/require"
@@ -92,7 +93,11 @@ func TestCLIManagementAndSecretOnce(t *testing.T) {
 	if err := Execute(context.Background(), []string{"allocation", "set-status", "--id", a, "--status", "active"}, &out, &out); err == nil {
 		t.Fatal("reopened revoked allocation")
 	}
-	cli(t, "migrate", "down")
+	var migrationStatus []migrations.Status
+	require.NoError(t, json.Unmarshal([]byte(cli(t, "migrate", "status")), &migrationStatus))
+	for range migrationStatus {
+		cli(t, "migrate", "down")
+	}
 	cli(t, "migrate", "up")
 	if got := strings.TrimSpace(cli(t, "grant", "list")); got != "[]" {
 		t.Fatal(got)
@@ -276,7 +281,7 @@ func TestManagementCommandsDoNotAutoMigrate(t *testing.T) {
 
 func TestOrdinaryCommandsSkipMigrationPreflightButServeRejectsDrift(t *testing.T) {
 	f := testutil.New(t, "100")
-	_, err := f.DB.DB.Exec(`INSERT INTO migrations(version,filename,sha256,applied_at_ms) VALUES (999,'999_unknown.sql',?,0)`, strings.Repeat("0", 64))
+	_, err := f.DB.DB.Exec(`INSERT INTO migrations(filename,sha256,applied_at_ms) VALUES ('999_unknown.sql',?,0)`, strings.Repeat("0", 64))
 	require.NoError(t, err)
 	t.Setenv("CLEARINGHOUSE_DB_PATH", f.Path)
 	if got := cli(t, "grant", "list"); !strings.Contains(got, f.Grant) {
