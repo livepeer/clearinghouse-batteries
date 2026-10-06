@@ -77,9 +77,13 @@ func displayAnyMap(row map[string]any) (map[string]any, error) {
 		if !ok {
 			return nil, fmt.Errorf("%s is not a string amount", key)
 		}
+		if s == "" {
+			out[key] = ""
+			continue
+		}
 		converted, err := units.UnitsToDecimal(s)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", key, err)
+			converted = "[error]"
 		}
 		out[key] = converted
 	}
@@ -101,9 +105,13 @@ func displayStringMap(row map[string]string) (map[string]string, error) {
 			continue
 		}
 		key = strings.TrimSuffix(key, suffix) + "_" + currency
+		if value == "" {
+			out[key] = ""
+			continue
+		}
 		converted, err := units.UnitsToDecimal(value)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", key, err)
+			converted = "[error]"
 		}
 		out[key] = converted
 	}
