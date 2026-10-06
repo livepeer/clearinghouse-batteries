@@ -1,89 +1,106 @@
 package migrations_test
 
+// These tests should exercise the migrator itself, not app contents
+
 import (
-	"context"
-	"path/filepath"
-	"strings"
+	"database/sql"
 	"testing"
 
-	"github.com/livepeer/clearinghouse/internal/store"
 	"github.com/livepeer/clearinghouse/migrations"
+	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/require"
 )
 
+func migrationDB(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite3", "file::memory:?_foreign_keys=on")
+	require.NoError(t, err)
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	return db
+}
+
+func TestMigrationRoundTrip(t *testing.T) {
+	ctx, db := t.Context(), migrationDB(t)
+	pending, err := migrations.List(ctx, db)
+	require.NoError(t, err)
+	require.NotEmpty(t, pending)
+	for _, item := range pending {
+		require.NotEmpty(t, item.Filename)
+		require.Len(t, item.SHA256, 64)
+		require.False(t, item.Applied)
+		require.Nil(t, item.AppliedAtMS)
+	}
+	require.NoError(t, migrations.Up(ctx, db))
+	applied, err := migrations.List(ctx, db)
+	require.NoError(t, err)
+	require.Len(t, applied, len(pending))
+	for i, item := range applied {
+		require.NotNil(t, item.AppliedAtMS)
+		require.Positive(t, *item.AppliedAtMS)
+		want := pending[i]
+		want.Applied, want.AppliedAtMS = true, item.AppliedAtMS
+		require.Equal(t, want, item)
+	}
+	// Applying an already current catalog leaves its metadata unchanged.
+	require.NoError(t, migrations.Up(ctx, db))
+	again, err := migrations.List(ctx, db)
+	require.NoError(t, err)
+	require.Equal(t, applied, again)
+	for i := len(applied) - 1; i >= 0; i-- {
+		require.NoError(t, migrations.Down(ctx, db))
+		applied[i] = pending[i]
+		status, err := migrations.List(ctx, db)
+		require.NoError(t, err)
+		require.Equal(t, applied, status)
+	}
+	require.NoError(t, migrations.Down(ctx, db))
+	require.NoError(t, migrations.Up(ctx, db))
+}
+
 func TestFailedMetadataWriteRollsBackEntireMigration(t *testing.T) {
-	ctx := context.Background()
-	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "migration.db"), true)
+	ctx, db := t.Context(), migrationDB(t)
+	// Initialize the migrator's metadata table without applying any migrations.
+	require.NoError(t, migrations.Down(ctx, db))
+	pending, err := migrations.List(ctx, db)
 	require.NoError(t, err)
-	defer db.Close()
-	require.NoError(t, migrations.Down(ctx, db.DB))
-	_, err = db.DB.Exec(`CREATE TRIGGER fail_metadata BEFORE INSERT ON migrations BEGIN SELECT RAISE(ABORT,'fixture failure'); END`)
+	_, err = db.Exec(`CREATE TRIGGER fail_metadata BEFORE INSERT ON migrations BEGIN SELECT RAISE(ABORT,'fixture failure'); END`)
 	require.NoError(t, err)
-	if err := migrations.Up(ctx, db.DB); err == nil {
-		t.Fatal("expected failure")
-	}
-	var n int
-	require.NoError(t, db.DB.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name IN ('grants','account_balances')`).Scan(&n))
-	if n != 0 {
-		t.Fatal("failed migration left schema changes")
-	}
-	_, err = db.DB.Exec(`DROP TRIGGER fail_metadata`)
+	var before, after int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM sqlite_master`).Scan(&before))
+	require.ErrorContains(t, migrations.Up(ctx, db), "fixture failure")
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM sqlite_master`).Scan(&after))
+	require.Equal(t, before, after, "failed migration left schema changes")
+	status, err := migrations.List(ctx, db)
 	require.NoError(t, err)
-	require.NoError(t, migrations.Up(ctx, db.DB))
-	status, err := migrations.List(ctx, db.DB)
+	require.Equal(t, pending, status)
+	_, err = db.Exec(`DROP TRIGGER fail_metadata`)
 	require.NoError(t, err)
-	if len(status) != 1 || status[0].Version != 1 || status[0].Filename != "001_initial.sql" || len(status[0].SHA256) != 64 || status[0].AppliedAtMS == nil || !status[0].Applied {
-		t.Fatal(status)
-	}
-	require.NoError(t, db.DB.QueryRow(`SELECT count(*) FROM account_balances`).Scan(&n))
-	if n != 0 {
-		t.Fatal("new database has unexpected balances", n)
-	}
-	var appliedAt int64
-	require.NoError(t, db.DB.QueryRow(`SELECT applied_at_ms FROM migrations WHERE version=1`).Scan(&appliedAt))
-	if appliedAt <= 0 {
-		t.Fatal(appliedAt)
-	}
-	require.NoError(t, migrations.Down(ctx, db.DB))
-	if status, err := migrations.List(ctx, db.DB); err != nil || len(status) != 1 || status[0].Applied {
-		t.Fatal(status, err)
-	}
-	require.NoError(t, db.DB.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name='account_balances'`).Scan(&n))
-	if n != 0 {
-		t.Fatal("migration down left balance table")
-	}
-	require.NoError(t, migrations.Up(ctx, db.DB))
-	_, err = db.DB.Exec(`INSERT INTO migrations(version,filename,sha256,applied_at_ms) VALUES (999,'999_unknown.sql',?,0)`, strings.Repeat("0", 64))
+	require.NoError(t, migrations.Up(ctx, db))
+	status, err = migrations.List(ctx, db)
 	require.NoError(t, err)
-	if _, err := migrations.List(ctx, db.DB); err == nil {
-		t.Fatal("accepted unknown schema version")
+	for _, item := range status {
+		require.True(t, item.Applied)
 	}
 }
 
 func TestMigrationMetadataMismatch(t *testing.T) {
-	for _, tc := range []struct {
-		name       string
-		column     string
-		value      string
-		want       string
-		upMustFail bool
-	}{
-		{name: "filename", column: "filename", value: "001_other.sql", want: "filename mismatch"},
-		{name: "checksum", column: "sha256", value: strings.Repeat("0", 64), want: "checksum mismatch", upMustFail: true},
+	for _, tc := range []struct{ name, query, want string }{
+		{"filename", `UPDATE migrations SET filename='renamed.sql' WHERE filename=?`, "unknown migration"},
+		{"checksum", `UPDATE migrations SET sha256=lower(hex(zeroblob(32))) WHERE filename=?`, "checksum mismatch"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx := context.Background()
-			db, err := store.Open(ctx, filepath.Join(t.TempDir(), "migration.db"), true)
+			ctx, db := t.Context(), migrationDB(t)
+			require.NoError(t, migrations.Up(ctx, db))
+			status, err := migrations.List(ctx, db)
 			require.NoError(t, err)
-			defer db.Close()
-
-			_, err = db.DB.Exec(`UPDATE migrations SET `+tc.column+`=? WHERE version=1`, tc.value)
+			require.NotEmpty(t, status)
+			_, err = db.Exec(tc.query, status[0].Filename)
 			require.NoError(t, err)
-			_, err = migrations.List(ctx, db.DB)
+			_, err = migrations.List(ctx, db)
 			require.ErrorContains(t, err, tc.want)
-			if tc.upMustFail {
-				require.ErrorContains(t, migrations.Up(ctx, db.DB), tc.want)
-			}
+			require.ErrorContains(t, migrations.Up(ctx, db), tc.want)
+			require.ErrorContains(t, migrations.Down(ctx, db), tc.want)
 		})
 	}
 }
