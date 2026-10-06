@@ -1,21 +1,24 @@
 # Livepeer grants clearinghouse
 
-The clearinghouse manages grants, allocations, and gateway API keys for Livepeer
-remote signing. It accounts for issued tickets and on-chain payments in SQLite.
+The clearinghouse manages grants, usage accounting, and API keys for Livepeer
+network payments. It tracks account usage and balances, issued tickets, and network
+settlement.
 
 ## How accounting works
 
-Grants provide budgets; allocations divide them among gateways. Each gateway
-uses an allocation's API key to request signing authorization. The signer logs
-issued tickets to Kafka, and the accounting service validates and charges them.
-The authorization webhook checks the allocation's available balance.
+Grants provide usage credits. Allocations define budgets within a grant, and
+each allocation can have multiple API keys. Payers (Livepeer gateways or remote
+signers) use these keys to authorize network payments.
+
+The clearinghouse authorization webhook checks the API key and the allocation's
+available balance. Payers log issued tickets to Kafka, and the accounting service
+validates those events and charges the allocation for usage.
 
 Authorization does not reserve funds. Delayed accounting can take an allocation
 negative before signing stops. Monitor accounting lag and quarantined events.
 
 The optional on-chain listener records payments and escrow (deposit + reserve)
-activity and matches settlements to signing sessions without charging grants
-again.
+activity. It matches settlements to sessions but does not charge for usage again.
 
 ## Quick start
 
@@ -266,8 +269,8 @@ by `--db-path`.
 Amounts use `--amount-usd` or `--amount-eth` (`amount_usd` / `amount_eth` in the
 API): exact decimals with up to 18 fractional digits. New grants default to
 USD $0 if the amount is omitted. Allocations inherit their grant's currency.
-Allocation creation and funding
-accept `all`. JSON amounts are decimal `*_usd` or `*_eth` strings.
+Allocation creation and funding accept `all`. JSON amounts are decimal `*_usd`
+or `*_eth` strings.
 
 Allocation API and CLI reads include `available_usd`/`spent_usd` (or `_eth`
 equivalents), defaulting to `"0"` if empty. Available is the remaining balance
@@ -356,7 +359,7 @@ curl -H 'Livepeer-Clearinghouse-Token: OPERATOR_SECRET' \
   'https://management.clearinghouse.example.com/v1/sessions?grant_id=GRANT_ID&allocation_id=ALLOCATION_ID'
 ```
 
-Lists endpoints accept `limit` (default 100, minimum 1, maximum 1,000) and an
+List endpoints accept `limit` (default 100, minimum 1, maximum 1,000) and an
 opaque `cursor`. Results are returned in insertion order, regardless of
 timestamps or IDs. Internal sequence numbers are excluded from item JSON. A
 response has this shape:
