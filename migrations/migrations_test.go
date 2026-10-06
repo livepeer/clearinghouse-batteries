@@ -43,7 +43,6 @@ func TestMigrationLifecycle(t *testing.T) {
 	_, err := db.Exec("INSERT INTO items VALUES (7)")
 	require.NoError(t, err)
 	first := list()[0]
-	require.Equal(t, 1, first.Version)
 	require.Equal(t, "001_create.sql", first.Filename)
 	require.Len(t, first.SHA256, 64)
 	require.True(t, first.Applied)
@@ -91,10 +90,9 @@ func TestMigrationLifecycle(t *testing.T) {
 
 func TestMigrationMetadataMismatch(t *testing.T) {
 	for _, tc := range []struct{ name, query, want string }{
-		{"filename", "UPDATE migrations SET filename='001_other.sql' WHERE version=1", "filename mismatch"},
-		{"checksum", "UPDATE migrations SET sha256=lower(hex(zeroblob(32))) WHERE version=1", "checksum mismatch"},
-		{"unknown version", "UPDATE migrations SET version=3 WHERE version=2", "unknown migration version"},
-		{"history gap", "DELETE FROM migrations WHERE version=1", "history has a gap"},
+		{"filename", "UPDATE migrations SET filename='001_other.sql' WHERE filename='001_create.sql'", "unknown migration"},
+		{"checksum", "UPDATE migrations SET sha256=lower(hex(zeroblob(32))) WHERE filename='001_create.sql'", "checksum mismatch"},
+		{"history gap", "DELETE FROM migrations WHERE filename='001_create.sql'", "history has a gap"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db, _ := migrationDB(t)
@@ -106,5 +104,69 @@ func TestMigrationMetadataMismatch(t *testing.T) {
 			require.ErrorContains(t, Up(t.Context(), db), tc.want)
 			require.ErrorContains(t, Down(t.Context(), db), tc.want)
 		})
+	}
+}
+
+func TestMigrationRoundTrip(t *testing.T) {
+	ctx, db := t.Context(), openTestDB(t)
+	pending, err := List(ctx, db)
+	require.NoError(t, err)
+	require.NotEmpty(t, pending)
+	for _, item := range pending {
+		require.NotEmpty(t, item.Filename)
+		require.Len(t, item.SHA256, 64)
+		require.False(t, item.Applied)
+		require.Nil(t, item.AppliedAtMS)
+	}
+	require.NoError(t, Up(ctx, db))
+	applied, err := List(ctx, db)
+	require.NoError(t, err)
+	require.Len(t, applied, len(pending))
+	for i, item := range applied {
+		require.NotNil(t, item.AppliedAtMS)
+		require.Positive(t, *item.AppliedAtMS)
+		want := pending[i]
+		want.Applied, want.AppliedAtMS = true, item.AppliedAtMS
+		require.Equal(t, want, item)
+	}
+	// Applying an already current catalog leaves its metadata unchanged.
+	require.NoError(t, Up(ctx, db))
+	again, err := List(ctx, db)
+	require.NoError(t, err)
+	require.Equal(t, applied, again)
+	for i := len(applied) - 1; i >= 0; i-- {
+		require.NoError(t, Down(ctx, db))
+		applied[i] = pending[i]
+		status, err := List(ctx, db)
+		require.NoError(t, err)
+		require.Equal(t, applied, status)
+	}
+	require.NoError(t, Down(ctx, db))
+	require.NoError(t, Up(ctx, db))
+}
+
+func TestFailedMetadataWriteRollsBackEntireMigration(t *testing.T) {
+	ctx, db := t.Context(), openTestDB(t)
+	// Initialize the migrator's metadata table without applying any migrations.
+	require.NoError(t, Down(ctx, db))
+	pending, err := List(ctx, db)
+	require.NoError(t, err)
+	_, err = db.Exec(`CREATE TRIGGER fail_metadata BEFORE INSERT ON migrations BEGIN SELECT RAISE(ABORT,'fixture failure'); END`)
+	require.NoError(t, err)
+	var before, after int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM sqlite_master`).Scan(&before))
+	require.ErrorContains(t, Up(ctx, db), "fixture failure")
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM sqlite_master`).Scan(&after))
+	require.Equal(t, before, after, "failed migration left schema changes")
+	status, err := List(ctx, db)
+	require.NoError(t, err)
+	require.Equal(t, pending, status)
+	_, err = db.Exec(`DROP TRIGGER fail_metadata`)
+	require.NoError(t, err)
+	require.NoError(t, Up(ctx, db))
+	status, err = List(ctx, db)
+	require.NoError(t, err)
+	for _, item := range status {
+		require.True(t, item.Applied)
 	}
 }

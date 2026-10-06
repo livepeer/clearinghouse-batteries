@@ -1,0 +1,17 @@
+Listen = "127.0.0.1:8937"
+MetricsListen = "127.0.0.1:8938"
+RPCURLFile = "/run/secrets/rpc-url"
+KeystoreFile = "/run/secrets/keystore.json"
+KeystorePasswordFile = "/run/secrets/keystore-password"
+MaxHourlyPrice = "100"
+MaxFixedPrice = "1"
+AuthWebhookFile = "/run/secrets/webhook-url"
+AuthWebhookHeadersFile = "/run/secrets/webhook-headers"
+# Defaults select Arbitrum One's Controller and ETH/USD oracle.
+[Kafka]
+Broker = "kafka://127.0.0.1:9092"
+Topic = "livepeer-signing"
+AuthMethod = "scram-sha-512"
+UsernameFile = "/run/secrets/kafka-username"
+PasswordFile = "/run/secrets/kafka-password"
+OutboxDB = "/data/signer-events.sqlite"

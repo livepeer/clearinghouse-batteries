@@ -70,7 +70,8 @@ func TestManagementRoutes(t *testing.T) {
 	require.Equal(t, "1.000000000000000001", row["total_eth"])
 	require.Equal(t, "not JSON: {bad}", row["metadata"])
 	require.NotContains(t, row, "total_wei")
-	require.Len(t, managementArray(t, managementRequest(t, handler, "GET", "/v1/grants", "", ""), 200), 2)
+	items, _ := managementPage(t, managementRequest(t, handler, "GET", "/v1/grants", "", ""), 200)
+	require.Len(t, items, 2)
 
 	contentType, form := managementForm(t, map[string]string{"grant_id": grantID, "name": "HTTP allocation", "amount_eth": "0.5", "metadata": "opaque allocation\n{bad"})
 	allocation := managementObject(t, managementRequest(t, handler, "POST", "/v1/allocations", contentType, form), 201)
@@ -78,7 +79,8 @@ func TestManagementRoutes(t *testing.T) {
 	row = managementObject(t, managementRequest(t, handler, "GET", "/v1/allocations/"+allocationID, "", ""), 200)
 	require.Equal(t, "0.5", row["allocated_eth"])
 	require.Equal(t, "opaque allocation\n{bad", row["metadata"])
-	require.Len(t, managementArray(t, managementRequest(t, handler, "GET", "/v1/allocations", "", ""), 200), 2)
+	items, _ = managementPage(t, managementRequest(t, handler, "GET", "/v1/allocations", "", ""), 200)
+	require.Len(t, items, 2)
 	require.Equal(t, "", managementObject(t, managementRequest(t, handler, "GET", "/v1/grants/"+f.Grant, "", ""), 200)["metadata"])
 	require.Equal(t, "", managementObject(t, managementRequest(t, handler, "GET", "/v1/allocations/"+f.Allocation, "", ""), 200)["metadata"])
 
@@ -104,7 +106,8 @@ func TestManagementRoutes(t *testing.T) {
 	require.NotEmpty(t, keyForGrant["allocation_id"])
 	managementObject(t, managementRequest(t, handler, "POST", "/v1/api-keys/"+createdKey["id"].(string)+"/revoke", "", ""), 200)
 
-	require.NotEmpty(t, managementArray(t, managementRequest(t, handler, "GET", "/v1/sessions", "", ""), 200))
+	items, _ = managementPage(t, managementRequest(t, handler, "GET", "/v1/sessions", "", ""), 200)
+	require.NotEmpty(t, items)
 	require.Equal(t, f.Session, managementObject(t, managementRequest(t, handler, "GET", "/v1/sessions/"+f.Session, "", ""), 200)["id"])
 	require.NoError(t, f.DB.Ingest(context.Background(), "test", 0, 0, f.Event(t, "http-usage", "7", testutil.PM)))
 	managementObject(t, managementRequest(t, handler, "POST", "/v1/sessions/"+f.Session+"/revoke", "", ""), 200)
@@ -112,7 +115,10 @@ func TestManagementRoutes(t *testing.T) {
 
 	stream := "42161:" + testutil.Contract + ":" + testutil.Sender
 	require.NoError(t, f.DB.BootstrapChain(context.Background(), stream, store.Block{Number: -1}, []store.EscrowSnapshot{{ChainID: "42161", Contract: testutil.Contract, Sender: testutil.Sender, Deposit: "12", Reserve: "3"}}))
-	for _, path := range []string{"/v1/settlements", "/v1/usage", "/v1/ledger/report", "/v1/escrow/report", "/v1/escrow/activity"} {
+	for _, path := range []string{"/v1/settlements", "/v1/usage"} {
+		managementPage(t, managementRequest(t, handler, "GET", path, "", ""), 200)
+	}
+	for _, path := range []string{"/v1/ledger/report", "/v1/escrow/report", "/v1/escrow/activity"} {
 		managementArray(t, managementRequest(t, handler, "GET", path, "", ""), 200)
 	}
 	require.Contains(t, managementRequest(t, handler, "GET", "/v1/usage", "", "").Body.String(), `"computed_fee_eth":"0.000000000000000007"`)
@@ -122,6 +128,74 @@ func TestManagementRoutes(t *testing.T) {
 	require.Equal(t, "revoked", managementObject(t, managementRequest(t, handler, "GET", "/v1/allocations/"+allocationID, "", ""), 200)["status"])
 	managementObject(t, managementRequest(t, handler, "PATCH", "/v1/allocations/"+allocationID+"/status", "application/json", `{"status":"active"}`), 409)
 	managementObject(t, managementRequest(t, handler, "GET", "/v1/grants/"+grantID, "", ""), 200)
+}
+
+func TestAPIKeyItemRoute(t *testing.T) {
+	f := testutil.New(t, "100")
+	handler := managementHandler(t.Context(), f.DB, testRegistry(t))
+	created := managementObject(t, managementRequest(t, handler, "POST", "/v1/api-keys", "application/json", fmt.Sprintf(`{"allocation_id":%q,"name":"gateway"}`, f.Allocation)), http.StatusCreated)
+	id, secret := created["id"].(string), created["api_key"].(string)
+	path := "/v1/api-keys/" + id
+	var createdAt int64
+	require.NoError(t, f.DB.DB.QueryRow(`SELECT created_at_ms FROM api_keys WHERE id=?`, id).Scan(&createdAt))
+	require.Greater(t, createdAt, int64(0))
+	want := map[string]any{
+		"id": id, "allocation_id": f.Allocation, "name": "gateway", "prefix": "lpg_" + id,
+		"created_at_ms": float64(createdAt), "last_used_at_ms": nil, "revoked_at_ms": nil,
+	}
+	check := func() {
+		t.Helper()
+		response := managementRequest(t, handler, "GET", path, "", "")
+		row := managementObject(t, response, http.StatusOK)
+		require.Equal(t, want, row)
+		require.NotContains(t, row, "api_key")
+		require.NotContains(t, row, "secret_hash")
+		require.NotContains(t, response.Body.String(), secret)
+	}
+	check()
+
+	request := f.Request
+	request.Headers = http.Header{"Authorization": []string{"Bearer " + secret}}
+	state := *f.Request.State
+	state.StateID = "api-key-item"
+	request.State = &state
+	decision, err := f.DB.Authorize(t.Context(), request)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, decision.Status)
+	var lastUsed int64
+	require.NoError(t, f.DB.DB.QueryRow(`SELECT last_used_at_ms FROM api_keys WHERE id=?`, id).Scan(&lastUsed))
+	require.Greater(t, lastUsed, int64(0))
+	want["last_used_at_ms"] = float64(lastUsed)
+	check()
+
+	managementObject(t, managementRequest(t, handler, "POST", path+"/revoke", "", ""), http.StatusOK)
+	var revokedAt int64
+	require.NoError(t, f.DB.DB.QueryRow(`SELECT revoked_at_ms FROM api_keys WHERE id=?`, id).Scan(&revokedAt))
+	require.Greater(t, revokedAt, int64(0))
+	want["revoked_at_ms"] = float64(revokedAt)
+	check()
+
+	missing := managementObject(t, managementRequest(t, handler, "GET", "/v1/api-keys/missing", "", ""), http.StatusNotFound)
+	require.Equal(t, map[string]any{"error": "resource not found"}, missing)
+}
+
+func managementPage(t *testing.T, response *httptest.ResponseRecorder, status int) ([]map[string]any, string) {
+	t.Helper()
+	value := managementObject(t, response, status)
+	require.Len(t, value, 2)
+	items, ok := value["items"].([]any)
+	require.True(t, ok, "items must be an array")
+	rows := make([]map[string]any, len(items))
+	for i, item := range items {
+		rows[i], ok = item.(map[string]any)
+		require.True(t, ok)
+		require.NotContains(t, rows[i], "seq")
+		require.NotContains(t, rows[i], "secret_hash")
+		require.NotContains(t, rows[i], "raw_payload")
+	}
+	next, ok := value["next_cursor"].(string)
+	require.True(t, ok, "next_cursor must be a string")
+	return rows, next
 }
 
 func managementArray(t *testing.T, response *httptest.ResponseRecorder, status int) []any {
@@ -144,6 +218,7 @@ func TestManagementErrors(t *testing.T) {
 		status                          int
 	}{
 		{"GET", "/v1/grants/missing", "", "", 404},
+		{"GET", "/v1/allocations/missing", "", "", 404},
 		{"POST", "/v1/allocations", "application/json", `{"name":"missing","grant_id":"missing","amount_eth":"1"}`, 404},
 		{"POST", "/v1/allocations", "application/json", fmt.Sprintf(`{"name":"too much","grant_id":%q,"amount_eth":"1"}`, f.Grant), 409},
 		{"POST", "/v1/grants", "application/json", `{"name":"bad","amount_eth":"1e2"}`, 400},

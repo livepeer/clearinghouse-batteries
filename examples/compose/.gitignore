@@ -1,0 +1,5 @@
+.env
+secrets/
+restored/
+validation-results/
+__pycache__/

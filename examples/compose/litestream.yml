@@ -1,0 +1,17 @@
+socket:
+  enabled: true
+  path: /var/run/litestream.sock
+shutdown-sync-timeout: 45s
+dbs:
+  - path: /data/clearinghouse.db
+    replica:
+      url: ${REPLICA_ROOT}/clearinghouse.db
+  - path: /data/minikafka_+meta.db
+    replica:
+      url: ${REPLICA_ROOT}/minikafka_+meta.db
+  - path: /data/minikafka_livepeer-signing_0.db
+    replica:
+      url: ${REPLICA_ROOT}/minikafka_livepeer-signing_0.db
+  - path: /data/signer-events.sqlite
+    replica:
+      url: ${REPLICA_ROOT}/signer-events.sqlite

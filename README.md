@@ -1,21 +1,24 @@
 # Livepeer grants clearinghouse
 
-The clearinghouse manages grants, allocations, and gateway API keys for Livepeer
-remote signing. It accounts for issued tickets and on-chain payments in SQLite.
+The clearinghouse manages grants, usage accounting, and API keys for Livepeer
+network payments. It tracks account usage and balances, issued tickets, and network
+settlement.
 
 ## How accounting works
 
-Grants provide budgets; allocations divide them among gateways. Each gateway
-uses an allocation's API key to request signing authorization. The signer logs
-issued tickets to Kafka, and the accounting service validates and charges them.
-The authorization webhook checks the allocation's available balance.
+Grants provide usage credits. Allocations define budgets within a grant, and
+each allocation can have multiple API keys. Payers (Livepeer gateways or remote
+signers) use these keys to authorize network payments.
+
+The clearinghouse authorization webhook checks the API key and the allocation's
+available balance. Payers log issued tickets to Kafka, and the accounting service
+validates those events and charges the allocation for usage.
 
 Authorization does not reserve funds. Delayed accounting can take an allocation
 negative before signing stops. Monitor accounting lag and quarantined events.
 
 The optional on-chain listener records payments and escrow (deposit + reserve)
-activity and matches settlements to signing sessions without charging grants
-again.
+activity. It matches settlements to sessions but does not charge for usage again.
 
 ## Quick start
 
@@ -97,6 +100,9 @@ After accounting applies ticket events, inspect balances:
 ```sh
 ./bin/clearinghouse ledger report
 ```
+
+See the [Docker Compose sample](examples/compose/README.md) for Clearinghouse +
+Livepeer Node signer, TLS termination, and a database backup/restore drill.
 
 ## How-to guides
 
@@ -263,8 +269,13 @@ by `--db-path`.
 Amounts use `--amount-usd` or `--amount-eth` (`amount_usd` / `amount_eth` in the
 API): exact decimals with up to 18 fractional digits. New grants default to
 USD $0 if the amount is omitted. Allocations inherit their grant's currency.
-Allocation creation and funding
-accept `all`. JSON amounts are decimal `*_usd` or `*_eth` strings.
+Allocation creation and funding accept `all`. JSON amounts are decimal `*_usd`
+or `*_eth` strings.
+
+Allocation API and CLI reads include `available_usd`/`spent_usd` (or `_eth`
+equivalents), defaulting to `"0"` if empty. Available is the remaining balance
+and may be negative; spent totals recorded usage, including late charges after
+revocation.
 
 Signer events missing USD or ETH amounts are quarantined. On-chain escrow and
 settlements remain in ETH.
@@ -281,8 +292,8 @@ unused funds, use `allocation revoke` or `POST /v1/allocations/{id}/revoke`
 ### Database management
 
 `serve` applies pending migrations. Before running CLI management or reports on
-a new database, run `migrate up`. `migrate down` can destroy accounting data; use
-it only on disposable databases or after a verified backup.
+a new database or after upgrading, run `migrate up`. `migrate down` can destroy
+accounting data; use it only on disposable databases or after a verified backup.
 
 For backups, use Litestream or stop all clearinghouse processes and management
 commands and copy the accounting and Kafka databases, including WAL/SHM files,
@@ -316,7 +327,7 @@ Resource routes require management credentials. The examples use a TLS proxy at
 | --- | --- |
 | Grants | `GET, POST /v1/grants`; `GET /v1/grants/{id}`; `POST /v1/grants/{id}/fund`; `PATCH /v1/grants/{id}/status` |
 | Allocations | `GET, POST /v1/allocations`; `GET /v1/allocations/{id}`; `POST /v1/allocations/{id}/fund`; `PATCH /v1/allocations/{id}/status`; `POST /v1/allocations/{id}/revoke` |
-| API keys | `GET, POST /v1/api-keys`; `POST /v1/api-keys/{id}/revoke` |
+| API keys | `GET, POST /v1/api-keys`; `GET /v1/api-keys/{id}`; `POST /v1/api-keys/{id}/revoke` |
 | Sessions | `GET /v1/sessions`; `GET /v1/sessions/{id}`; `POST /v1/sessions/{id}/revoke` |
 | Reports | `GET /v1/settlements`, `/v1/usage`, `/v1/ledger/report`, `/v1/escrow/report`, `/v1/escrow/activity` |
 
@@ -337,9 +348,44 @@ curl -H 'Livepeer-Clearinghouse-Token: OPERATOR_SECRET' \
 
 Responses use the CLI's JSON fields and types, including decimal amount strings,
 millisecond timestamps, and string `metadata`. Item routes return one object;
-lists have no filtering or pagination. Migrations are CLI-only.
+lists return paged objects with `items` and `next_cursor`. Ledger and escrow
+reports return arrays. New API-key secrets are returned on creation and matching
+idempotent retries. Migrations are CLI-only.
+
+```sh
+curl -H 'Livepeer-Clearinghouse-Token: OPERATOR_SECRET' \
+  'https://management.clearinghouse.example.com/v1/allocations?grant_id=GRANT_ID&limit=100'
+
+curl -H 'Livepeer-Clearinghouse-Token: OPERATOR_SECRET' \
+  'https://management.clearinghouse.example.com/v1/sessions?grant_id=GRANT_ID&allocation_id=ALLOCATION_ID'
+
+curl -H 'Livepeer-Clearinghouse-Token: OPERATOR_SECRET' \
+  'https://management.clearinghouse.example.com/v1/usage?allocation_id=ALLOCATION_ID&manifest_id=MANIFEST_ID'
+```
+
+List endpoints accept `limit` (default 100, minimum 1, maximum 1,000) and an
+opaque `cursor`. Results are returned in insertion order, regardless of
+timestamps or IDs. Internal sequence numbers are excluded from item JSON. A
+response has this shape:
+
+```json
+{"items": [], "next_cursor": ""}
+```
+
+When `next_cursor` is nonempty, pass it as `cursor` to fetch the next page:
+
+```sh
+curl -H 'Livepeer-Clearinghouse-Token: OPERATOR_SECRET' \
+  'https://management.clearinghouse.example.com/v1/allocations?grant_id=GRANT_ID&limit=100&cursor=NEXT_CURSOR'
+```
+
+An empty `next_cursor` means there are no more items. Pagination reads live data,
+so later inserts may appear in subsequent pages and ownership changes may affect
+filtered results.
 
 Missing or invalid credentials, or credentials for another service, return `401`.
+Malformed queries, unknown parameters, repeated parameters and empty values
+return `400`. HEAD requests use the same list query validation as GET.
 Missing route permissions return `403`. Both use plain text. Additional funding
 permission failures return `403` with a JSON `error` string. Other errors from
 resource handlers also use JSON `error` strings:
@@ -353,7 +399,21 @@ resource handlers also use JSON `error` strings:
 | `415` | Unsupported or missing content type. |
 | `500` | Unexpected failure. |
 
-#### Imdepotent API Calls
+Resource list routes allow only the following query parameters:
+
+| List route | Allowed query parameters |
+| --- | --- |
+| `/v1/grants` | `limit`, `cursor` |
+| `/v1/allocations` | `grant_id`, `limit`, `cursor` |
+| `/v1/api-keys`, `/v1/sessions`, `/v1/settlements` | `grant_id`, `allocation_id`, `limit`, `cursor` |
+| `/v1/usage` | `grant_id`, `allocation_id`, `manifest_id`, `limit`, `cursor` |
+
+Filters match IDs exactly. Results must match every supplied filter. Unknown IDs
+or an allocation that does not belong to the specified grant return `200` with
+`{"items":[],"next_cursor":""}`. Usage and settlements without
+an associated session appear only in unfiltered lists.
+
+#### Idempotent API Calls
 
 Allocation and API-key creation, and grant and allocation funding, accept an
 optional `Idempotency-Key` header. Choose a new random value for each operation
@@ -361,7 +421,7 @@ and keep it for retries. The key can be 256 characters long using the base64url
 alphabet of `A-Z`, `a-z`, `0-9`, `_`, `-`, or `=`. Keys are case-sensitive;
 invalid headers return `400`.
 
-Imdepotercy keys are shared across these operations and all callers within a grant.
+Idempotency keys are shared across these operations and all callers within a grant.
 Different grants may reuse a key. Matching retries return the original HTTP
 status and JSON response. Reusing a key with a different operation, target, or
 body returns `409`. Matching uses decoded strings: `"1"` and `"\u0031"` match,

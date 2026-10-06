@@ -25,6 +25,18 @@ type IDParams struct {
 	ID string `descr:"Resource ID"`
 }
 type ListParams struct{ Common }
+type GrantListParams struct {
+	Common
+	GrantID string `optional:"true" descr:"Filter by parent grant ID"`
+}
+type AllocationListParams struct {
+	GrantListParams
+	AllocationID string `optional:"true" descr:"Filter by allocation ID (combined with grant ID when supplied)"`
+}
+type UsageListParams struct {
+	AllocationListParams
+	ManifestID string `optional:"true" descr:"Filter by manifest ID (requires an associated payment session)"`
+}
 type StatusParams struct {
 	IDParams
 	Status string `descr:"New status"`
@@ -213,14 +225,38 @@ Exactly one of --amount-usd or --amount-eth is required with --grant-id and cann
 }
 
 func listCommand(kind string) *cobra.Command {
-	return command[ListParams]("list", "List "+kind+" records as JSON", func(p *ListParams, c *cobra.Command) error {
-		return withDB(c, p.Common, false, func(db *store.Store) (any, error) { return db.List(c.Context(), kind, "") })
-	})
+	run := func(c *cobra.Command, p Common, options store.ListOptions) error {
+		for _, filter := range []struct{ name, value string }{{"grant-id", options.GrantID}, {"allocation-id", options.AllocationID}, {"manifest-id", options.ManifestID}} {
+			if c.Flags().Changed(filter.name) && filter.value == "" {
+				return errors.New("--" + filter.name + " must not be empty")
+			}
+		}
+		return withDB(c, p, false, func(db *store.Store) (any, error) { return db.List(c.Context(), kind, options) })
+	}
+	short := "List " + kind + " records as JSON"
+	switch kind {
+	case "grant":
+		return command[ListParams]("list", short, func(p *ListParams, c *cobra.Command) error {
+			return run(c, p.Common, store.ListOptions{})
+		})
+	case "allocation":
+		return command[GrantListParams]("list", short, func(p *GrantListParams, c *cobra.Command) error {
+			return run(c, p.Common, store.ListOptions{GrantID: p.GrantID})
+		})
+	case "usage":
+		return command[UsageListParams]("list", short, func(p *UsageListParams, c *cobra.Command) error {
+			return run(c, p.Common, store.ListOptions{GrantID: p.GrantID, AllocationID: p.AllocationID, ManifestID: p.ManifestID})
+		})
+	default:
+		return command[AllocationListParams]("list", short, func(p *AllocationListParams, c *cobra.Command) error {
+			return run(c, p.Common, store.ListOptions{GrantID: p.GrantID, AllocationID: p.AllocationID})
+		})
+	}
 }
 func addRead(group *cobra.Command, kind string) {
 	group.AddCommand(listCommand(kind))
 	group.AddCommand(command[IDParams]("show", "Show one "+kind, func(p *IDParams, c *cobra.Command) error {
-		return withDB(c, p.Common, false, func(db *store.Store) (any, error) { return db.List(c.Context(), kind, p.ID) })
+		return withDB(c, p.Common, false, func(db *store.Store) (any, error) { return db.List(c.Context(), kind, store.ListOptions{ID: p.ID}) })
 	}))
 }
 func addRevoke(group *cobra.Command, kind string) {

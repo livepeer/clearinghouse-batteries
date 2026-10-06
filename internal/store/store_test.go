@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -80,19 +81,22 @@ func TestMigrationsConstraintsAndRoundTrip(t *testing.T) {
 		require.NoError(t, f.DB.DB.QueryRowContext(ctx, q).Scan(&metadata), q)
 		require.Equal(t, "", metadata, q)
 	}
-	for _, index := range []string{"allocations_grant", "keys_allocation", "sessions_allocation", "usage_status", "signing_match", "ledger_account", "ledger_transaction", "settlements_match", "settlements_block", "ticket_broker_events_block", "ticket_broker_events_sender"} {
-		var n int
-		require.NoError(t, f.DB.DB.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='index' AND name=?`, index).Scan(&n))
-		if n != 1 {
-			t.Fatalf("missing index %s", index)
-		}
+	// Constraint indexes have NULL SQL; compare the complete set of explicit indexes.
+	indexes, err := f.DB.Rows(ctx, `SELECT name FROM sqlite_master WHERE type='index' AND sql IS NOT NULL ORDER BY name`)
+	require.NoError(t, err)
+	actual := make([]string, len(indexes))
+	for i, index := range indexes {
+		actual[i] = index["name"].(string)
 	}
+	require.ElementsMatch(t, []string{"allocations_grant", "keys_allocation", "sessions_allocation", "usage_status", "usage_session", "usage_manifest", "signing_match", "balances_owner", "ledger_account", "ledger_transaction", "settlements_match", "settlements_block", "settlements_session", "ticket_broker_events_block", "ticket_broker_events_sender"}, actual)
 	require.NoError(t, migrations.Up(ctx, f.DB.DB))
 	list, err := migrations.List(ctx, f.DB.DB)
 	require.NoError(t, err)
 	require.NotEmpty(t, list)
 	for _, item := range list {
 		require.True(t, item.Applied)
+	}
+	for range list {
 		require.NoError(t, migrations.Down(ctx, f.DB.DB))
 	}
 	require.NoError(t, migrations.Up(ctx, f.DB.DB))
@@ -185,20 +189,118 @@ func TestIngestExactMoneyReplayQuarantineOverdraw(t *testing.T) {
 	assertBalanced(t, f.DB)
 }
 
+func TestIngestManifestID(t *testing.T) {
+	f := testutil.New(t, "100")
+	for offset, tc := range []struct {
+		name, value, manifest, status string
+	}{
+		{"valid", `"manifest-1"`, "manifest-1", "applied"},
+		{"numeric string", `"1"`, "1", "applied"},
+		{"missing", "", "", "applied"},
+		{"null", `null`, "", "applied"},
+		{"empty", `""`, "", "applied"},
+		{"number", `1`, "", "quarantined"},
+		{"boolean", `true`, "", "quarantined"},
+		{"object", `{}`, "", "quarantined"},
+		{"array", `[]`, "", "quarantined"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var env store.Envelope
+			require.NoError(t, json.Unmarshal(f.Event(t, tc.name, "1", testutil.PM), &env))
+			var data map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(env.Data, &data))
+			if tc.value == "" {
+				delete(data, "manifest_id")
+			} else {
+				data["manifest_id"] = json.RawMessage(tc.value)
+			}
+			var err error
+			env.Data, err = json.Marshal(data)
+			require.NoError(t, err)
+			raw, err := json.Marshal(env)
+			require.NoError(t, err)
+			require.NoError(t, f.DB.Ingest(t.Context(), "manifest", 0, int64(offset), raw))
+			var manifest, status string
+			require.NoError(t, f.DB.DB.QueryRow(`SELECT manifest_id,status FROM usage_events WHERE event_id=?`, tc.name).Scan(&manifest, &status))
+			require.Equal(t, tc.manifest, manifest)
+			require.Equal(t, tc.status, status)
+		})
+	}
+}
+
+func TestUsageManifestColumn(t *testing.T) {
+	f := testutil.New(t, "100")
+	const manifest = "manifest+%/&é"
+	for i, event := range []struct {
+		id, status string
+		manifest   any
+		linked     bool
+	}{
+		{"applied", "applied", manifest, true},
+		{"quarantined", "quarantined", manifest, true},
+		{"ignored", "ignored", manifest, true},
+		{"duplicate", "duplicate", manifest, true},
+		{"unassociated", "quarantined", manifest, false},
+		{"missing", "applied", "", true},
+		{"null", "applied", nil, true},
+		{"numeric-string", "applied", "1", true},
+	} {
+		var session any
+		if event.linked {
+			session = f.Session
+		}
+		// The stored column controls filtering even when raw_payload is malformed.
+		_, err := f.DB.DB.Exec(`INSERT INTO usage_events(id,topic,partition,offset,raw_payload,payment_session_id,manifest_id,status,created_at_ms) VALUES (?,'manifest',0,?,?,?,?,?,0)`, event.id, i, []byte(`{bad`), session, event.manifest, event.status)
+		require.NoError(t, err)
+	}
+	for _, tc := range []struct {
+		manifest string
+		want     []string
+	}{
+		{manifest, []string{"applied", "quarantined", "ignored", "duplicate"}},
+		{"1", []string{"numeric-string"}},
+		{"missing", []string{}},
+	} {
+		t.Run(tc.manifest, func(t *testing.T) {
+			rows, err := f.DB.List(t.Context(), "usage", store.ListOptions{ManifestID: tc.manifest})
+			require.NoError(t, err)
+			ids := make([]string, len(rows))
+			for i, row := range rows {
+				ids[i] = row["id"].(string)
+			}
+			require.Equal(t, tc.want, ids)
+		})
+	}
+	all, err := f.DB.List(t.Context(), "usage", store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, all, 8)
+}
+
 func TestQuarantineBindingsAndConflictingID(t *testing.T) {
 	f := testutil.New(t, "100")
 	ctx := context.Background()
 	valid := f.Event(t, "event", "10", testutil.PM)
 	require.NoError(t, f.DB.Ingest(ctx, "test", 0, 0, valid))
-	variants := [][]byte{[]byte(strings.ReplaceAll(string(valid), `"10"`, `"20"`)), []byte(strings.ReplaceAll(string(f.Event(t, "unknown", "10", testutil.PM)), f.Session, "unknown")), []byte(strings.ReplaceAll(string(f.Event(t, "binding", "10", testutil.PM)), "state-1", "state-other")), []byte(strings.ReplaceAll(string(f.Event(t, "missing", "10", testutil.PM)), f.Session, ""))}
+	variants := [][]byte{
+		[]byte(strings.ReplaceAll(string(valid), `"10"`, `"20"`)),
+		[]byte(strings.ReplaceAll(string(f.Event(t, "unknown", "10", testutil.PM)), f.Session, "unknown")),
+		[]byte(strings.ReplaceAll(string(f.Event(t, "binding", "10", testutil.PM)), "state-1", "state-other")),
+		[]byte(strings.ReplaceAll(string(f.Event(t, "missing", "10", testutil.PM)), f.Session, "")),
+		[]byte(strings.ReplaceAll(string(f.Event(t, "wrong-pipeline", "10", testutil.PM)), `"pipeline":"live"`, `"pipeline":"wrong"`)),
+		[]byte(strings.ReplaceAll(string(f.Event(t, "fixed-pipeline", "10", testutil.PM)), `"pipeline":"live"`, `"pipeline":"fixed"`)),
+		[]byte(strings.ReplaceAll(string(f.Event(t, "empty-pipeline", "10", testutil.PM)), `"pipeline":"live"`, `"pipeline":""`)),
+	}
 	for i, raw := range variants {
 		require.NoError(t, f.DB.Ingest(ctx, "test", 0, int64(i+1), raw))
 	}
 	var quarantined int
 	require.NoError(t, f.DB.DB.QueryRow(`SELECT count(*) FROM usage_events WHERE status='quarantined'`).Scan(&quarantined))
-	if quarantined != 4 {
+	if quarantined != len(variants) {
 		t.Fatal(quarantined)
 	}
+	var signed int
+	require.NoError(t, f.DB.DB.QueryRow(`SELECT count(*) FROM signing_authorizations`).Scan(&signed))
+	require.Equal(t, 1, signed)
 	bal, err := store.Balance(ctx, f.DB.DB, "allocation_available", f.Allocation)
 	require.NoError(t, err)
 	if bal.String() != "90" {
@@ -394,7 +496,7 @@ func TestRevocationReturnsOnlyUnspentAndLateChargeIsRecorded(t *testing.T) {
 	require.NoError(t, f.DB.Ingest(ctx, "test", 0, 0, f.Event(t, "one", "40", testutil.PM)))
 	require.NoError(t, f.DB.SetStatus(ctx, "allocation", f.Allocation, "revoked"))
 	require.NoError(t, f.DB.SetStatus(ctx, "allocation", f.Allocation, "revoked"))
-	rows, err := f.DB.List(ctx, "allocation", f.Allocation)
+	rows, err := f.DB.List(ctx, "allocation", store.ListOptions{ID: f.Allocation})
 	require.NoError(t, err)
 	require.Equal(t, "revoked", rows[0]["status"])
 	require.Equal(t, "40", rows[0]["allocated_units"])

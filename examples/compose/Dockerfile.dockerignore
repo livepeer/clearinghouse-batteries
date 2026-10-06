@@ -1,0 +1,6 @@
+.git
+bin
+**/secrets
+**/restored
+**/__pycache__
+**/validation-results

@@ -42,6 +42,55 @@ func TestBalancesHandleLargeAmountsAndOverdraw(t *testing.T) {
 	}
 }
 
+func TestAllocationBalanceQueryIsolation(t *testing.T) {
+	for _, currency := range []string{"usd", "eth"} {
+		t.Run(currency, func(t *testing.T) {
+			f := testutil.NewCurrency(t, "1000000000000000001", currency)
+			ctx := t.Context()
+			otherCurrency := "eth"
+			if currency == "eth" {
+				otherCurrency = "usd"
+			}
+			require.NoError(t, f.DB.FundCurrency(ctx, "grant", f.Grant, "2000000000000000002", currency))
+			other, err := f.DB.Create(ctx, "allocation", store.Create{Name: "other", GrantID: f.Grant, Amount: "2000000000000000002", Metadata: "opaque\nmetadata"})
+			require.NoError(t, err)
+			require.NoError(t, f.DB.Write(ctx, func(tx *sql.Tx) error {
+				// Unrelated account types and currencies must not affect allocation reads.
+				for _, entry := range []struct{ account, currency, amount string }{
+					{"allocation_available", otherCurrency, "777"},
+					{"allocation_spent", otherCurrency, "333"},
+					{"treasury_cash", currency, "999"},
+				} {
+					amount, ok := new(big.Int).SetString(entry.amount, 10)
+					require.True(t, ok)
+					if err := store.TransferCurrency(ctx, tx, store.ID(), "fixture", "allocation", f.Allocation, "grant_funding_source", f.Grant, entry.account, f.Allocation, entry.currency, amount); err != nil {
+						return err
+					}
+				}
+				return nil
+			}))
+
+			list, err := f.DB.List(ctx, "allocation", store.ListOptions{})
+			require.NoError(t, err)
+			require.Len(t, list, 2)
+			for i, id := range []string{f.Allocation, other} {
+				rows, err := f.DB.List(ctx, "allocation", store.ListOptions{ID: id})
+				require.NoError(t, err)
+				require.Len(t, rows, 1)
+				base, err := f.DB.Rows(ctx, `SELECT * FROM grant_allocations WHERE id=?`, id)
+				require.NoError(t, err)
+				delete(base[0], "seq")
+				base[0]["available_units"] = []string{"1000000000000000001", "2000000000000000002"}[i]
+				base[0]["spent_units"] = "0"
+				require.Equal(t, base, rows)
+				require.Equal(t, rows[0], list[i])
+			}
+			_, err = f.DB.List(ctx, "allocation", store.ListOptions{ID: "missing"})
+			require.ErrorIs(t, err, sql.ErrNoRows)
+		})
+	}
+}
+
 func TestBalanceUpdateFailureRollsBackUsageAndFunding(t *testing.T) {
 	f := testutil.New(t, "100")
 	ctx := context.Background()

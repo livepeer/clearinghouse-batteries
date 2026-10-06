@@ -171,7 +171,7 @@ func TestRPCConfirmationDuplicateDelayedAttributionAndReorg(t *testing.T) {
 	if next != 5 {
 		t.Fatal(next)
 	}
-	rows, err := f.DB.List(ctx, "settlement", "")
+	rows, err := f.DB.List(ctx, "settlement", store.ListOptions{})
 	require.NoError(t, err)
 	if len(rows) != 1 || rows[0]["match_status"] != "unmatched" {
 		t.Fatal(rows)
@@ -187,7 +187,7 @@ func TestRPCConfirmationDuplicateDelayedAttributionAndReorg(t *testing.T) {
 	}
 	pm := crypto.Keccak256Hash(common.LeftPadBytes(big.NewInt(1).Bytes(), 32)).Hex()
 	require.NoError(t, f.DB.Ingest(ctx, "test", 0, 0, f.Event(t, "usage", "10", pm)))
-	rows, err = f.DB.List(ctx, "settlement", "")
+	rows, err = f.DB.List(ctx, "settlement", store.ListOptions{})
 	require.NoError(t, err)
 	if rows[0]["match_status"] != "matched" || rows[0]["payment_session_id"] != f.Session || rows[0]["authorization_id"] != nil {
 		t.Fatal(rows)
@@ -209,7 +209,7 @@ func TestRPCConfirmationDuplicateDelayedAttributionAndReorg(t *testing.T) {
 	require.NoError(t, err)
 	_, err = l.Step(ctx)
 	require.NoError(t, err)
-	rows, err = f.DB.List(ctx, "settlement", "")
+	rows, err = f.DB.List(ctx, "settlement", store.ListOptions{})
 	require.NoError(t, err)
 	if len(rows) != 2 {
 		t.Fatal(rows)
@@ -259,7 +259,7 @@ func TestAmbiguousSessionsAndDeepReorg(t *testing.T) {
 	api.logs = makeRedemptionLogs(t, api.headers[3], 1)
 	_, err = l.Step(ctx)
 	require.NoError(t, err)
-	rows, err := f.DB.List(ctx, "settlement", "")
+	rows, err := f.DB.List(ctx, "settlement", store.ListOptions{})
 	require.NoError(t, err)
 	if rows[0]["match_status"] != "ambiguous" || rows[0]["payment_session_id"] != nil {
 		t.Fatal(rows)
@@ -383,7 +383,7 @@ func TestEscrowFundingPartialRedemptionWithdrawalAndReporting(t *testing.T) {
 	if len(report) != 1 || report[0]["deposit_balance_wei"] != "0" || report[0]["reserve_balance_wei"] != "0" || report[0]["total_balance_wei"] != "0" || report[0]["confirmed_through_block"] != "4" {
 		t.Fatal(report)
 	}
-	settlements, err := f.DB.List(ctx, "settlement", "")
+	settlements, err := f.DB.List(ctx, "settlement", store.ListOptions{})
 	require.NoError(t, err)
 	if len(settlements) != 1 || settlements[0]["face_value_wei"] != "200" || settlements[0]["paid_amount_wei"] != "150" || settlements[0]["deposit_paid_wei"] != "110" || settlements[0]["reserve_paid_wei"] != "40" {
 		t.Fatal(settlements)
