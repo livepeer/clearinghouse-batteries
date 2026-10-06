@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/livepeer/clearinghouse/internal/serviceauth"
+	"github.com/livepeer/clearinghouse/internal/store"
 	"github.com/livepeer/clearinghouse/internal/testutil"
 	"github.com/stretchr/testify/require"
 )
@@ -140,7 +141,7 @@ func TestCreationFundingPermissions(t *testing.T) {
 						contentType, body = managementForm(t, fields)
 					}
 					kind := strings.TrimSuffix(resource, "s")
-					before, err := f.DB.List(t.Context(), kind, "")
+					before, err := f.DB.List(t.Context(), kind, store.ListOptions{})
 					require.NoError(t, err)
 					balances, err := f.DB.Report(t.Context())
 					require.NoError(t, err)
@@ -148,7 +149,7 @@ func TestCreationFundingPermissions(t *testing.T) {
 					response := managementRequest(t, handler, "POST", "/v1/"+resource, contentType, body, "limited-secret")
 					if !credential.canFund && creation.units != "0" {
 						require.Equal(t, http.StatusForbidden, response.Code)
-						after, err := f.DB.List(t.Context(), kind, "")
+						after, err := f.DB.List(t.Context(), kind, store.ListOptions{})
 						require.NoError(t, err)
 						require.Equal(t, before, after)
 						afterBalances, err := f.DB.Report(t.Context())
@@ -157,7 +158,7 @@ func TestCreationFundingPermissions(t *testing.T) {
 						return
 					}
 					result := managementObject(t, response, http.StatusCreated)
-					rows, err := f.DB.List(t.Context(), kind, result["id"].(string))
+					rows, err := f.DB.List(t.Context(), kind, store.ListOptions{ID: result["id"].(string)})
 					require.NoError(t, err)
 					column := "total_units"
 					if resource == "allocations" {

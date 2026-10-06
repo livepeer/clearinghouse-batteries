@@ -18,6 +18,10 @@ type Create struct {
 	Starts, Ends                                                            *int64
 }
 
+type ListOptions struct {
+	ID, GrantID, AllocationID string
+}
+
 var ErrInvalidManagementInput = errors.New("invalid management input")
 var ErrManagementConflict = errors.New("management conflict")
 
@@ -381,7 +385,7 @@ func insertKey(ctx context.Context, tx *sql.Tx, allocation string, record keyRec
 	return err
 }
 
-func (s *Store) List(ctx context.Context, kind, id string) ([]map[string]any, error) {
+func (s *Store) List(ctx context.Context, kind string, options ListOptions) ([]map[string]any, error) {
 	queries := map[string]string{
 		"grant": `SELECT * FROM grants`, "allocation": `SELECT * FROM grant_allocations`,
 		"api-key": `SELECT id,allocation_id,name,prefix,created_at_ms,last_used_at_ms,revoked_at_ms FROM api_keys`,
@@ -394,14 +398,43 @@ func (s *Store) List(ctx context.Context, kind, id string) ([]map[string]any, er
 	if !ok {
 		return nil, fmt.Errorf("unknown resource %q", kind)
 	}
+	if kind == "grant" && (options.GrantID != "" || options.AllocationID != "") {
+		return nil, invalidInput("grant lists do not accept grant_id or allocation_id filters")
+	}
+	if kind == "allocation" && options.AllocationID != "" {
+		return nil, invalidInput("allocation lists do not accept allocation_id filters")
+	}
+	var conditions, filters []string
 	args := []any{}
-	if id != "" {
-		q += " WHERE id=?"
-		args = append(args, id)
+	if options.ID != "" {
+		conditions = append(conditions, "id=?")
+		args = append(args, options.ID)
+	}
+	if options.GrantID != "" {
+		condition := "allocation_id IN (SELECT id FROM grant_allocations WHERE grant_id=?)"
+		if kind == "allocation" {
+			condition = "grant_id=?"
+		}
+		filters = append(filters, condition)
+		args = append(args, options.GrantID)
+	}
+	if options.AllocationID != "" {
+		filters = append(filters, "allocation_id=?")
+		args = append(args, options.AllocationID)
+	}
+	if len(filters) > 0 {
+		if kind == "usage" || kind == "settlement" {
+			conditions = append(conditions, "payment_session_id IN (SELECT id FROM payment_sessions WHERE "+strings.Join(filters, " AND ")+")")
+		} else {
+			conditions = append(conditions, filters...)
+		}
+	}
+	if len(conditions) > 0 {
+		q += " WHERE " + strings.Join(conditions, " AND ")
 	}
 	q += " ORDER BY created_at_ms,id"
 	rows, err := s.Rows(ctx, q, args...)
-	if err == nil && id != "" && len(rows) == 0 {
+	if err == nil && options.ID != "" && len(rows) == 0 {
 		return nil, sql.ErrNoRows
 	}
 	return rows, err

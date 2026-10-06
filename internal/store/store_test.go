@@ -404,7 +404,7 @@ func TestRevocationReturnsOnlyUnspentAndLateChargeIsRecorded(t *testing.T) {
 	require.NoError(t, f.DB.Ingest(ctx, "test", 0, 0, f.Event(t, "one", "40", testutil.PM)))
 	require.NoError(t, f.DB.SetStatus(ctx, "allocation", f.Allocation, "revoked"))
 	require.NoError(t, f.DB.SetStatus(ctx, "allocation", f.Allocation, "revoked"))
-	rows, err := f.DB.List(ctx, "allocation", f.Allocation)
+	rows, err := f.DB.List(ctx, "allocation", store.ListOptions{ID: f.Allocation})
 	require.NoError(t, err)
 	require.Equal(t, "revoked", rows[0]["status"])
 	require.Equal(t, "40", rows[0]["allocated_units"])
