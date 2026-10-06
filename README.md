@@ -292,8 +292,8 @@ unused funds, use `allocation revoke` or `POST /v1/allocations/{id}/revoke`
 ### Database management
 
 `serve` applies pending migrations. Before running CLI management or reports on
-a new database, run `migrate up`. `migrate down` can destroy accounting data; use
-it only on disposable databases or after a verified backup.
+a new database or after upgrading, run `migrate up`. `migrate down` can destroy
+accounting data; use it only on disposable databases or after a verified backup.
 
 For backups, use Litestream or stop all clearinghouse processes and management
 commands and copy the accounting and Kafka databases, including WAL/SHM files,
@@ -357,6 +357,9 @@ curl -H 'Livepeer-Clearinghouse-Token: OPERATOR_SECRET' \
 
 curl -H 'Livepeer-Clearinghouse-Token: OPERATOR_SECRET' \
   'https://management.clearinghouse.example.com/v1/sessions?grant_id=GRANT_ID&allocation_id=ALLOCATION_ID'
+
+curl -H 'Livepeer-Clearinghouse-Token: OPERATOR_SECRET' \
+  'https://management.clearinghouse.example.com/v1/usage?allocation_id=ALLOCATION_ID&manifest_id=MANIFEST_ID'
 ```
 
 List endpoints accept `limit` (default 100, minimum 1, maximum 1,000) and an
@@ -401,11 +404,12 @@ Resource list routes allow only the following query parameters:
 | --- | --- |
 | `/v1/grants` | `limit`, `cursor` |
 | `/v1/allocations` | `grant_id`, `limit`, `cursor` |
-| `/v1/api-keys`, `/v1/sessions`, `/v1/usage`, `/v1/settlements` | `grant_id`, `allocation_id`, `limit`, `cursor` |
+| `/v1/api-keys`, `/v1/sessions`, `/v1/settlements` | `grant_id`, `allocation_id`, `limit`, `cursor` |
+| `/v1/usage` | `grant_id`, `allocation_id`, `manifest_id`, `limit`, `cursor` |
 
-Filters match IDs exactly. When both filters are supplied, results must match
-both. Unknown IDs or an allocation that does not belong to the specified grant
-return `200` with `{"items":[],"next_cursor":""}`. Usage and settlements without
+Filters match IDs exactly. Results must match every supplied filter. Unknown IDs
+or an allocation that does not belong to the specified grant return `200` with
+`{"items":[],"next_cursor":""}`. Usage and settlements without
 an associated session appear only in unfiltered lists.
 
 ## Development

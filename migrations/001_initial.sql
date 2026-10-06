@@ -43,12 +43,13 @@ CREATE INDEX sessions_allocation ON payment_sessions(allocation_id);
 CREATE TABLE usage_events (
  seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, event_id TEXT UNIQUE, topic TEXT NOT NULL, partition INTEGER NOT NULL CHECK(partition>=0 AND partition<=2147483647), offset INTEGER NOT NULL CHECK(offset>=0),
  raw_payload BLOB NOT NULL, payment_session_id TEXT REFERENCES payment_sessions(id),
- pipeline TEXT, request_id TEXT, started_at_ms INTEGER, ended_at_ms INTEGER, billable_seconds TEXT, pixels TEXT, computed_fee_wei TEXT, computed_fee_usd TEXT,
+ pipeline TEXT, request_id TEXT, manifest_id TEXT, started_at_ms INTEGER, ended_at_ms INTEGER, billable_seconds TEXT, pixels TEXT, computed_fee_wei TEXT, computed_fee_usd TEXT,
  status TEXT NOT NULL CHECK(status IN ('applied','quarantined','ignored','duplicate')), error TEXT NOT NULL DEFAULT '', created_at_ms INTEGER NOT NULL,
  UNIQUE(topic, partition, offset)
 ) STRICT;
 CREATE INDEX usage_status ON usage_events(status,created_at_ms);
 CREATE INDEX usage_session ON usage_events(payment_session_id) WHERE payment_session_id IS NOT NULL;
+CREATE INDEX usage_manifest ON usage_events(manifest_id) WHERE payment_session_id IS NOT NULL;
 CREATE TABLE signing_authorizations (
  id TEXT PRIMARY KEY, usage_event_id TEXT NOT NULL UNIQUE REFERENCES usage_events(id), payment_session_id TEXT NOT NULL REFERENCES payment_sessions(id),
  request_id TEXT NOT NULL, sequence_number TEXT NOT NULL CHECK(sequence_number<>'' AND sequence_number NOT GLOB '*[^0-9]*' AND (sequence_number='0' OR substr(sequence_number,1,1)<>'0')),

@@ -19,6 +19,7 @@ type listCursor struct {
 	Kind         string `json:"kind"`
 	GrantID      string `json:"grant_id"`
 	AllocationID string `json:"allocation_id"`
+	ManifestID   string `json:"manifest_id,omitempty"`
 	Seq          int64  `json:"seq"`
 }
 
@@ -32,7 +33,7 @@ func managementListQuery(r *http.Request, kind string, filters ...string) (store
 	if err != nil {
 		return store.ListOptions{}, err
 	}
-	options := store.ListOptions{GrantID: query.Get("grant_id"), AllocationID: query.Get("allocation_id"), Limit: defaultListLimit}
+	options := store.ListOptions{GrantID: query.Get("grant_id"), AllocationID: query.Get("allocation_id"), ManifestID: query.Get("manifest_id"), Limit: defaultListLimit}
 	if raw := query.Get("limit"); raw != "" {
 		limit, err := strconv.ParseUint(raw, 10, 64)
 		if err != nil || limit < 1 || limit > maxListLimit {
@@ -49,7 +50,7 @@ func managementListQuery(r *http.Request, kind string, filters ...string) (store
 		if err := jsonv2.Unmarshal(data, &cursor, jsonv2.RejectUnknownMembers(true)); err != nil || cursor.Version != 1 || cursor.Seq <= 0 {
 			return store.ListOptions{}, badManagementRequest("invalid cursor")
 		}
-		if cursor.Kind != kind || cursor.GrantID != options.GrantID || cursor.AllocationID != options.AllocationID {
+		if cursor.Kind != kind || cursor.GrantID != options.GrantID || cursor.AllocationID != options.AllocationID || cursor.ManifestID != options.ManifestID {
 			return store.ListOptions{}, badManagementRequest("cursor does not match resource or filters")
 		}
 		options.AfterSeq = cursor.Seq
@@ -67,7 +68,7 @@ func managementList(ctx context.Context, db *store.Store, kind string, options s
 	next := ""
 	if len(rows) > limit {
 		rows = rows[:limit]
-		next = (listCursor{Version: 1, Kind: kind, GrantID: options.GrantID, AllocationID: options.AllocationID, Seq: rows[limit-1]["seq"].(int64)}).encode()
+		next = (listCursor{Version: 1, Kind: kind, GrantID: options.GrantID, AllocationID: options.AllocationID, ManifestID: options.ManifestID, Seq: rows[limit-1]["seq"].(int64)}).encode()
 	}
 	for _, row := range rows {
 		delete(row, "seq")

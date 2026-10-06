@@ -56,7 +56,11 @@ func newListFixture(t *testing.T) (*testutil.Fixture, []listOwner) {
 	// Seed historical records directly to test their stored ownership links.
 	for i, owner := range owners {
 		id := fmt.Sprint("usage-", i)
-		_, err := f.DB.DB.Exec("INSERT INTO usage_events (id,event_id,topic,partition,offset,raw_payload,payment_session_id,status,created_at_ms) VALUES (?,?,'list',0,?,?,?,'applied',1)", id, id, i, []byte("{}"), owner.session)
+		manifest := "manifest-1"
+		if i == 1 {
+			manifest = "manifest-2"
+		}
+		_, err := f.DB.DB.Exec("INSERT INTO usage_events (id,event_id,topic,partition,offset,raw_payload,payment_session_id,request_id,pipeline,manifest_id,status,created_at_ms) VALUES (?,?,'list',0,?,?,?,?,?,?,'applied',1)", id, id, i, []byte("{}"), owner.session, "request-"+id, "live", manifest)
 		require.NoError(t, err)
 	}
 	_, err := f.DB.DB.Exec("INSERT INTO usage_events (id,topic,partition,offset,raw_payload,status,created_at_ms) VALUES ('usage-unassociated','list',0,4,?,'quarantined',1)", []byte("{bad"))
@@ -132,6 +136,20 @@ func TestResourceListFiltersAndPagination(t *testing.T) {
 				filterCase{"both unknown", store.ListOptions{GrantID: "missing", AllocationID: "missing"}, nil},
 			)
 		}
+		if resource.kind == "usage" {
+			cases = append(cases,
+				filterCase{"manifest", store.ListOptions{ManifestID: "manifest-1"}, []int{0, 2, 3}},
+				filterCase{"other manifest", store.ListOptions{ManifestID: "manifest-2"}, []int{1}},
+				filterCase{"unknown manifest", store.ListOptions{ManifestID: "missing"}, nil},
+				filterCase{"case-sensitive manifest", store.ListOptions{ManifestID: "Manifest-1"}, nil},
+				filterCase{"literal manifest ID", store.ListOptions{ManifestID: "' OR 1=1 --"}, nil},
+				filterCase{"grant and manifest", store.ListOptions{GrantID: owners[0].grant, ManifestID: "manifest-1"}, []int{0, 3}},
+				filterCase{"allocation and manifest", store.ListOptions{AllocationID: owners[0].allocation, ManifestID: "manifest-1"}, []int{0, 3}},
+				filterCase{"all matching", store.ListOptions{GrantID: owners[0].grant, AllocationID: owners[0].allocation, ManifestID: "manifest-1"}, []int{0, 3}},
+				filterCase{"manifest ownership mismatch", store.ListOptions{AllocationID: owners[0].allocation, ManifestID: "manifest-2"}, nil},
+				filterCase{"all ownership mismatch", store.ListOptions{GrantID: owners[2].grant, AllocationID: owners[0].allocation, ManifestID: "manifest-1"}, nil},
+			)
+		}
 		for _, tc := range cases {
 			t.Run(resource.path+"/"+tc.name, func(t *testing.T) {
 				want := []string{}
@@ -153,6 +171,10 @@ func TestResourceListFiltersAndPagination(t *testing.T) {
 					query.Set("allocation_id", tc.options.AllocationID)
 					args = append(args, "--allocation-id", tc.options.AllocationID)
 				}
+				if tc.options.ManifestID != "" {
+					query.Set("manifest_id", tc.options.ManifestID)
+					args = append(args, "--manifest-id", tc.options.ManifestID)
+				}
 				output := cli(t, args...)
 				var cliRows []map[string]any
 				require.NoError(t, json.Unmarshal([]byte(output), &cliRows))
@@ -170,10 +192,80 @@ func TestResourceListFiltersAndPagination(t *testing.T) {
 				}
 				if resource.kind == "usage" {
 					require.NotContains(t, output, "raw_payload")
+					if tc.options == (store.ListOptions{}) {
+						for i, row := range cliRows {
+							for _, field := range []string{"allocation_id", "payment_session_id", "request_id", "pipeline", "manifest_id"} {
+								require.Contains(t, row, field)
+							}
+							if i >= len(owners) {
+								require.Nil(t, row["allocation_id"])
+								require.Nil(t, row["payment_session_id"])
+								continue
+							}
+							require.Equal(t, owners[i].allocation, row["allocation_id"])
+							require.Equal(t, owners[i].session, row["payment_session_id"])
+							require.Equal(t, "request-"+resource.ids[i], row["request_id"])
+							require.Equal(t, "live", row["pipeline"])
+							manifest := "manifest-1"
+							if i == 1 {
+								manifest = "manifest-2"
+							}
+							require.Equal(t, manifest, row["manifest_id"])
+						}
+					}
 				}
 			})
 		}
 	}
+}
+
+func TestGatewayUsageForJob(t *testing.T) {
+	f, owners := newListFixture(t)
+	t.Setenv("CLEARINGHOUSE_DB_PATH", f.Path)
+	const manifest = "manifest+%/&é"
+	// A second job shares the first allocation; another allocation shares its manifest.
+	_, err := f.DB.DB.Exec(`UPDATE usage_events SET manifest_id=? WHERE id IN ('usage-0','usage-2')`, manifest)
+	require.NoError(t, err)
+	registry := testRegistry(t, `{"id":"gateway","secret":"gateway-secret","management":{"allow":["usage.read"]}}`)
+	handler := managementHandler(t.Context(), f.DB, registry)
+	query := url.Values{"allocation_id": {owners[0].allocation}, "manifest_id": {manifest}, "limit": {"1"}}
+	response := managementRequest(t, handler, "GET", "/v1/usage?"+query.Encode(), "", "", "gateway-secret")
+	items, next := managementPage(t, response, http.StatusOK)
+	require.Equal(t, []string{"usage-0"}, listIDs(t, items))
+	require.Empty(t, next)
+	var cliRows []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(cli(t, "usage", "list", "--allocation-id", owners[0].allocation, "--manifest-id", manifest)), &cliRows))
+	require.Equal(t, items, cliRows)
+}
+
+func TestUsageManifestCursors(t *testing.T) {
+	f, owners := newListFixture(t)
+	handler := managementHandler(t.Context(), f.DB, testRegistry(t))
+	_, filtered := managementPage(t, managementRequest(t, handler, "GET", "/v1/usage?manifest_id=manifest-1&limit=1", "", ""), http.StatusOK)
+	require.NotEmpty(t, filtered)
+	_, unfiltered := managementPage(t, managementRequest(t, handler, "GET", "/v1/usage?limit=1", "", ""), http.StatusOK)
+	for _, query := range []url.Values{
+		{"cursor": {filtered}},
+		{"cursor": {filtered}, "manifest_id": {"manifest-2"}},
+		{"cursor": {unfiltered}, "manifest_id": {"manifest-1"}},
+	} {
+		for _, method := range []string{"GET", "HEAD"} {
+			result := managementObject(t, managementRequest(t, handler, method, "/v1/usage?"+query.Encode(), "", ""), http.StatusBadRequest)
+			require.Equal(t, "cursor does not match resource or filters", result["error"])
+		}
+	}
+	valid := url.Values{"cursor": {filtered}, "manifest_id": {"manifest-1"}}
+	require.Equal(t, http.StatusOK, managementRequest(t, handler, "HEAD", "/v1/usage?"+valid.Encode(), "", "").Code)
+
+	// A v1 cursor created before manifest filtering has no manifest_id member.
+	var seq int64
+	require.NoError(t, f.DB.DB.QueryRow(`SELECT seq FROM usage_events WHERE id='usage-0'`).Scan(&seq))
+	legacy, err := json.Marshal(map[string]any{"version": 1, "kind": "usage", "grant_id": owners[0].grant, "allocation_id": "", "seq": seq})
+	require.NoError(t, err)
+	query := url.Values{"grant_id": {owners[0].grant}, "cursor": {base64.RawURLEncoding.EncodeToString(legacy)}}
+	items, next := managementPage(t, managementRequest(t, handler, "GET", "/v1/usage?"+query.Encode(), "", ""), http.StatusOK)
+	require.Equal(t, []string{"usage-1", "usage-3"}, listIDs(t, items))
+	require.Empty(t, next)
 }
 
 func TestManagementListQueries(t *testing.T) {
@@ -187,11 +279,11 @@ func TestManagementListQueries(t *testing.T) {
 		{"allocations", []string{"grant_id"}},
 		{"api-keys", []string{"grant_id", "allocation_id"}},
 		{"sessions", []string{"grant_id", "allocation_id"}},
-		{"usage", []string{"grant_id", "allocation_id"}},
+		{"usage", []string{"grant_id", "allocation_id", "manifest_id"}},
 		{"settlements", []string{"grant_id", "allocation_id"}},
 	} {
 		managementPage(t, managementRequest(t, handler, "GET", "/v1/"+route.path, "", ""), http.StatusOK)
-		for _, name := range []string{"grant_id", "allocation_id", "unknown"} {
+		for _, name := range []string{"grant_id", "allocation_id", "manifest_id", "unknown"} {
 			t.Run(route.path+"/"+name, func(t *testing.T) {
 				response := managementRequest(t, handler, "GET", "/v1/"+route.path+"?"+name+"=missing", "", "")
 				if slices.Contains(route.allowed, name) {
@@ -205,17 +297,17 @@ func TestManagementListQueries(t *testing.T) {
 		}
 	}
 	// All list routes share the same parser; exercise its edge cases once.
-	invalid := []string{"unknown=", "GrantID=x", "grant-id=x", "grant_id=%zz", "grant_id=x;y", "grant_id=missing&unknown=%zz", "grant_id=x&grant%5Fid=x"}
-	for _, name := range []string{"grant_id", "allocation_id", "limit", "cursor"} {
+	invalid := []string{"unknown=", "GrantID=x", "grant-id=x", "grant_id=%zz", "grant_id=x;y", "grant_id=missing&unknown=%zz", "grant_id=x&grant%5Fid=x", "manifest_id=%zz", "manifest_id=x&manifest%5Fid=x"}
+	for _, name := range []string{"grant_id", "allocation_id", "manifest_id", "limit", "cursor"} {
 		invalid = append(invalid, name, name+"=", name+"=x&"+name+"=x", name+"=x&"+name+"=y", name+"=&"+name+"=", name+"=x&"+name+"=")
 	}
 	for _, query := range invalid {
 		t.Run(query, func(t *testing.T) {
-			result := managementObject(t, managementRequest(t, handler, "GET", "/v1/sessions?"+query, "", ""), http.StatusBadRequest)
+			result := managementObject(t, managementRequest(t, handler, "GET", "/v1/usage?"+query, "", ""), http.StatusBadRequest)
 			require.NotEmpty(t, result["error"])
 		})
 	}
-	require.Equal(t, http.StatusBadRequest, managementRequest(t, handler, "HEAD", "/v1/sessions?grant_id=", "", "").Code)
+	require.Equal(t, http.StatusBadRequest, managementRequest(t, handler, "HEAD", "/v1/usage?manifest_id=", "", "").Code)
 	// List query validation does not apply to item or report routes.
 	managementObject(t, managementRequest(t, handler, "GET", "/v1/grants/"+f.Grant+"?unknown=", "", ""), http.StatusOK)
 	managementArray(t, managementRequest(t, handler, "GET", "/v1/ledger/report?unknown=", "", ""), http.StatusOK)
@@ -390,7 +482,7 @@ func TestCLIListFilterFlags(t *testing.T) {
 		{[]string{"allocation", "list"}, []string{"grant-id"}},
 		{[]string{"api-key", "list"}, []string{"grant-id", "allocation-id"}},
 		{[]string{"session", "list"}, []string{"grant-id", "allocation-id"}},
-		{[]string{"usage", "list"}, []string{"grant-id", "allocation-id"}},
+		{[]string{"usage", "list"}, []string{"grant-id", "allocation-id", "manifest-id"}},
 		{[]string{"settlement", "list"}, []string{"grant-id", "allocation-id"}},
 		{[]string{"grant", "show"}, nil},
 		{[]string{"allocation", "show"}, nil},
@@ -402,7 +494,7 @@ func TestCLIListFilterFlags(t *testing.T) {
 	} {
 		t.Run(strings.Join(command.args, " "), func(t *testing.T) {
 			help := cli(t, append(slices.Clone(command.args), "--help")...)
-			for _, name := range []string{"grant-id", "allocation-id"} {
+			for _, name := range []string{"grant-id", "allocation-id", "manifest-id"} {
 				if slices.Contains(command.allowed, name) {
 					require.Contains(t, help, "--"+name)
 					for _, flag := range [][]string{{"--" + name + "="}, {"--" + name, ""}} {
