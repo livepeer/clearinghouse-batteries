@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -87,7 +88,7 @@ func TestMigrationsConstraintsAndRoundTrip(t *testing.T) {
 	for i, index := range indexes {
 		actual[i] = index["name"].(string)
 	}
-	require.ElementsMatch(t, []string{"allocations_grant", "keys_allocation", "sessions_allocation", "usage_status", "usage_session", "signing_match", "balances_owner", "ledger_account", "ledger_transaction", "settlements_match", "settlements_block", "settlements_session", "ticket_broker_events_block", "ticket_broker_events_sender"}, actual)
+	require.ElementsMatch(t, []string{"allocations_grant", "keys_allocation", "sessions_allocation", "usage_status", "usage_session", "usage_manifest", "signing_match", "balances_owner", "ledger_account", "ledger_transaction", "settlements_match", "settlements_block", "settlements_session", "ticket_broker_events_block", "ticket_broker_events_sender"}, actual)
 	require.NoError(t, migrations.Up(ctx, f.DB.DB))
 	list, err := migrations.List(ctx, f.DB.DB)
 	require.NoError(t, err)
@@ -186,6 +187,93 @@ func TestIngestExactMoneyReplayQuarantineOverdraw(t *testing.T) {
 	defer db.Close()
 	require.NoError(t, db.Ingest(ctx, "test", 0, 3, f.Event(t, "event-2", "17", testutil.PM)))
 	assertBalanced(t, f.DB)
+}
+
+func TestIngestManifestID(t *testing.T) {
+	f := testutil.New(t, "100")
+	for offset, tc := range []struct {
+		name, value, manifest, status string
+	}{
+		{"valid", `"manifest-1"`, "manifest-1", "applied"},
+		{"numeric string", `"1"`, "1", "applied"},
+		{"missing", "", "", "applied"},
+		{"null", `null`, "", "applied"},
+		{"empty", `""`, "", "applied"},
+		{"number", `1`, "", "quarantined"},
+		{"boolean", `true`, "", "quarantined"},
+		{"object", `{}`, "", "quarantined"},
+		{"array", `[]`, "", "quarantined"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var env store.Envelope
+			require.NoError(t, json.Unmarshal(f.Event(t, tc.name, "1", testutil.PM), &env))
+			var data map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(env.Data, &data))
+			if tc.value == "" {
+				delete(data, "manifest_id")
+			} else {
+				data["manifest_id"] = json.RawMessage(tc.value)
+			}
+			var err error
+			env.Data, err = json.Marshal(data)
+			require.NoError(t, err)
+			raw, err := json.Marshal(env)
+			require.NoError(t, err)
+			require.NoError(t, f.DB.Ingest(t.Context(), "manifest", 0, int64(offset), raw))
+			var manifest, status string
+			require.NoError(t, f.DB.DB.QueryRow(`SELECT manifest_id,status FROM usage_events WHERE event_id=?`, tc.name).Scan(&manifest, &status))
+			require.Equal(t, tc.manifest, manifest)
+			require.Equal(t, tc.status, status)
+		})
+	}
+}
+
+func TestUsageManifestColumn(t *testing.T) {
+	f := testutil.New(t, "100")
+	const manifest = "manifest+%/&é"
+	for i, event := range []struct {
+		id, status string
+		manifest   any
+		linked     bool
+	}{
+		{"applied", "applied", manifest, true},
+		{"quarantined", "quarantined", manifest, true},
+		{"ignored", "ignored", manifest, true},
+		{"duplicate", "duplicate", manifest, true},
+		{"unassociated", "quarantined", manifest, false},
+		{"missing", "applied", "", true},
+		{"null", "applied", nil, true},
+		{"numeric-string", "applied", "1", true},
+	} {
+		var session any
+		if event.linked {
+			session = f.Session
+		}
+		// The stored column controls filtering even when raw_payload is malformed.
+		_, err := f.DB.DB.Exec(`INSERT INTO usage_events(id,topic,partition,offset,raw_payload,payment_session_id,manifest_id,status,created_at_ms) VALUES (?,'manifest',0,?,?,?,?,?,0)`, event.id, i, []byte(`{bad`), session, event.manifest, event.status)
+		require.NoError(t, err)
+	}
+	for _, tc := range []struct {
+		manifest string
+		want     []string
+	}{
+		{manifest, []string{"applied", "quarantined", "ignored", "duplicate"}},
+		{"1", []string{"numeric-string"}},
+		{"missing", []string{}},
+	} {
+		t.Run(tc.manifest, func(t *testing.T) {
+			rows, err := f.DB.List(t.Context(), "usage", store.ListOptions{ManifestID: tc.manifest})
+			require.NoError(t, err)
+			ids := make([]string, len(rows))
+			for i, row := range rows {
+				ids[i] = row["id"].(string)
+			}
+			require.Equal(t, tc.want, ids)
+		})
+	}
+	all, err := f.DB.List(t.Context(), "usage", store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, all, 8)
 }
 
 func TestQuarantineBindingsAndConflictingID(t *testing.T) {

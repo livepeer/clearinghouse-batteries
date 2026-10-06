@@ -33,6 +33,10 @@ type AllocationListParams struct {
 	GrantListParams
 	AllocationID string `optional:"true" descr:"Filter by allocation ID (combined with grant ID when supplied)"`
 }
+type UsageListParams struct {
+	AllocationListParams
+	ManifestID string `optional:"true" descr:"Filter by manifest ID (requires an associated payment session)"`
+}
 type StatusParams struct {
 	IDParams
 	Status string `descr:"New status"`
@@ -222,7 +226,7 @@ Exactly one of --amount-usd or --amount-eth is required with --grant-id and cann
 
 func listCommand(kind string) *cobra.Command {
 	run := func(c *cobra.Command, p Common, options store.ListOptions) error {
-		for _, filter := range []struct{ name, value string }{{"grant-id", options.GrantID}, {"allocation-id", options.AllocationID}} {
+		for _, filter := range []struct{ name, value string }{{"grant-id", options.GrantID}, {"allocation-id", options.AllocationID}, {"manifest-id", options.ManifestID}} {
 			if c.Flags().Changed(filter.name) && filter.value == "" {
 				return errors.New("--" + filter.name + " must not be empty")
 			}
@@ -238,6 +242,10 @@ func listCommand(kind string) *cobra.Command {
 	case "allocation":
 		return command[GrantListParams]("list", short, func(p *GrantListParams, c *cobra.Command) error {
 			return run(c, p.Common, store.ListOptions{GrantID: p.GrantID})
+		})
+	case "usage":
+		return command[UsageListParams]("list", short, func(p *UsageListParams, c *cobra.Command) error {
+			return run(c, p.Common, store.ListOptions{GrantID: p.GrantID, AllocationID: p.AllocationID, ManifestID: p.ManifestID})
 		})
 	default:
 		return command[AllocationListParams]("list", short, func(p *AllocationListParams, c *cobra.Command) error {

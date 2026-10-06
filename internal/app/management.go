@@ -60,7 +60,7 @@ func managementHandler(ctx context.Context, db *store.Store, registry *serviceau
 		{"api-keys", "api-key", true, []string{"grant_id", "allocation_id"}},
 		{"sessions", "session", true, []string{"grant_id", "allocation_id"}},
 		{"settlements", "settlement", false, []string{"grant_id", "allocation_id"}},
-		{"usage", "usage", false, []string{"grant_id", "allocation_id"}},
+		{"usage", "usage", false, []string{"grant_id", "allocation_id", "manifest_id"}},
 	} {
 		path, kind := resource.path, resource.kind
 		handle("GET /v1/"+path, strings.ReplaceAll(path, "-", "_")+".read", http.StatusOK, func(w http.ResponseWriter, r *http.Request) (any, error) {

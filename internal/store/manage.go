@@ -19,7 +19,7 @@ type Create struct {
 }
 
 type ListOptions struct {
-	ID, GrantID, AllocationID string
+	ID, GrantID, AllocationID, ManifestID string
 	// A positive Limit includes seq for the caller to build continuation metadata.
 	Limit    int
 	AfterSeq int64
@@ -389,6 +389,18 @@ func insertKey(ctx context.Context, tx *sql.Tx, allocation string, record keyRec
 }
 
 func (s *Store) List(ctx context.Context, kind string, options ListOptions) ([]map[string]any, error) {
+	q, args, err := listQuery(kind, options)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.Rows(ctx, q, args...)
+	if err == nil && options.ID != "" && len(rows) == 0 {
+		return nil, sql.ErrNoRows
+	}
+	return rows, err
+}
+
+func listQuery(kind string, options ListOptions) (string, []any, error) {
 	queries := map[string]string{
 		"grant": `SELECT id,name,sponsor,total_units,currency,starts_at_ms,ends_at_ms,status,metadata,created_at_ms FROM grants`,
 		"allocation": `SELECT a.id,a.grant_id,a.name,a.beneficiary,a.allocated_units,a.currency,a.starts_at_ms,a.ends_at_ms,a.status,a.metadata,a.created_at_ms,
@@ -402,21 +414,26 @@ func (s *Store) List(ctx context.Context, kind string, options ListOptions) ([]m
  face_value_wei,paid_amount_wei,deposit_paid_wei,reserve_paid_wei,win_probability,sender_nonce,recipient_rand,
  pm_session_id,aux_data,payment_session_id,authorization_id,match_status,status,generation,created_at_ms,settled_at_ms FROM settlements`,
 		"usage": `SELECT id,event_id,topic,partition,offset,status,error,computed_fee_wei,computed_fee_usd,created_at_ms,
+ payment_session_id,request_id,pipeline,manifest_id,
+ (SELECT s.allocation_id FROM payment_sessions s WHERE s.id=usage_events.payment_session_id) AS allocation_id,
  (SELECT a.currency FROM payment_sessions s JOIN grant_allocations a ON a.id=s.allocation_id WHERE s.id=usage_events.payment_session_id) AS currency
  FROM usage_events`,
 	}
 	q, ok := queries[kind]
 	if !ok {
-		return nil, fmt.Errorf("unknown resource %q", kind)
+		return "", nil, fmt.Errorf("unknown resource %q", kind)
 	}
 	if options.Limit < 0 || options.AfterSeq < 0 {
-		return nil, invalidInput("limit and after sequence must not be negative")
+		return "", nil, invalidInput("limit and after sequence must not be negative")
 	}
 	if kind == "grant" && (options.GrantID != "" || options.AllocationID != "") {
-		return nil, invalidInput("grant lists do not accept grant_id or allocation_id filters")
+		return "", nil, invalidInput("grant lists do not accept grant_id or allocation_id filters")
 	}
 	if kind == "allocation" && options.AllocationID != "" {
-		return nil, invalidInput("allocation lists do not accept allocation_id filters")
+		return "", nil, invalidInput("allocation lists do not accept allocation_id filters")
+	}
+	if kind != "usage" && options.ManifestID != "" {
+		return "", nil, invalidInput("manifest_id filters are only valid for usage lists")
 	}
 	prefix := ""
 	if kind == "allocation" {
@@ -454,6 +471,10 @@ func (s *Store) List(ctx context.Context, kind string, options ListOptions) ([]m
 			conditions = append(conditions, filters...)
 		}
 	}
+	if options.ManifestID != "" {
+		conditions = append(conditions, "payment_session_id IS NOT NULL", "manifest_id=?")
+		args = append(args, options.ManifestID)
+	}
 	if len(conditions) > 0 {
 		q += " WHERE " + strings.Join(conditions, " AND ")
 	}
@@ -462,9 +483,5 @@ func (s *Store) List(ctx context.Context, kind string, options ListOptions) ([]m
 		q += " LIMIT ?"
 		args = append(args, options.Limit)
 	}
-	rows, err := s.Rows(ctx, q, args...)
-	if err == nil && options.ID != "" && len(rows) == 0 {
-		return nil, sql.ErrNoRows
-	}
-	return rows, err
+	return q, args, nil
 }
