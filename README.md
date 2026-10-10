@@ -436,7 +436,7 @@ backups as described in [SECURITY.md](SECURITY.md).
 
 ## Development
 
-Builds require Go 1.27.1, CGO, and a C compiler for SQLite. `make check` runs
+Builds require Go 1.27.2, CGO, and a C compiler for SQLite. `make check` runs
 race-enabled tests, `go vet`, and a production build. Tests use local fixtures
 without a live chain or production credentials.
 
