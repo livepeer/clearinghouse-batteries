@@ -1,4 +1,4 @@
-export GOTOOLCHAIN := go1.27.1
+export GOTOOLCHAIN := go1.27.2
 export CGO_ENABLED := 1
 
 .PHONY: build test vet check benchmark

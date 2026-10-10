@@ -1,5 +1,5 @@
 # Build from the livepeer/node checkout selected by NODE_SOURCE.
-FROM golang:1.27.1-bookworm AS build
+FROM golang:1.27.2-bookworm AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
