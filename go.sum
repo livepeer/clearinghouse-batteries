@@ -112,8 +112,8 @@ github.com/inconshreveable/mousetrap v1.1.0 h1:wN+x4NVGpMsO7ErUn/mUI3vEoE6Jt13X2
 github.com/inconshreveable/mousetrap v1.1.0/go.mod h1:vpF70FUmC8bwa3OWnCshd2FqLfsEA9PFc4w1p2J65bw=
 github.com/j0sh/boa v1.0.0 h1:H7sN8mp6iWmspOm+Y5tKq3EKxn/T+5MYOZHQN5MEO1A=
 github.com/j0sh/boa v1.0.0/go.mod h1:SOgv7tdMMzVSyWPxP2OyWL077VILk83isVD6CXbyuE8=
-github.com/j0sh/minikafka v0.0.0-20260926062644-e1e6f1f8aae9 h1:F3SqG70YI3z6gXPC5St/HUesxqyt+DyxQtDNN9aPIzQ=
-github.com/j0sh/minikafka v0.0.0-20260926062644-e1e6f1f8aae9/go.mod h1:akLKEMvm/CLxdF3C07jwUvdwYt1tRjXds1vlRY+XrOE=
+github.com/j0sh/minikafka v0.0.0-20261016010625-aeee8b249880 h1:b214m+uG3WP0+8ADAdiDILprNasgjRk57D6o78G+uBs=
+github.com/j0sh/minikafka v0.0.0-20261016010625-aeee8b249880/go.mod h1:akLKEMvm/CLxdF3C07jwUvdwYt1tRjXds1vlRY+XrOE=
 github.com/jackpal/go-nat-pmp v1.0.2 h1:KzKSgb7qkJvOUTqYl9/Hg/me3pWgBmERKrTGD7BdWus=
 github.com/jackpal/go-nat-pmp v1.0.2/go.mod h1:QPH045xvCAeXUZOxsnwmrtiCoxIr9eob+4orBN1SBKc=
 github.com/klauspost/compress v1.18.7 h1:aUyZsS4kH3QTKurYhAOwAHxllVPnOthb3vPfnF1Ehjw=

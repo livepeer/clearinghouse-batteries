@@ -73,7 +73,7 @@ func TestAuthWebhookBindValidation(t *testing.T) {
 func TestServeConfigPrecedence(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "serve.toml")
 	credsPath := testCredsFile(t)
-	config := fmt.Sprintf("EnableKafka = true\nEnableAuthWebhook = \":7101\"\nCredsFile = %q\n", credsPath)
+	config := fmt.Sprintf("EnableKafka = true\nEnableAuthWebhook = \":7101\"\nCredsFile = %q\nKafkaAdvertisedAddr = \"config:9093\"\n", credsPath)
 	require.NoError(t, os.WriteFile(path, []byte(config), 0600))
 	read := func(args ...string) ServeParams {
 		t.Helper()
@@ -87,20 +87,25 @@ func TestServeConfigPrecedence(t *testing.T) {
 		return got
 	}
 
+	require.Empty(t, read("--enable-kafka", "--creds-file", credsPath).KafkaAdvertisedAddr)
 	fromConfig := read("--config-file", path)
 	require.Equal(t, "127.0.0.1:7101", fromConfig.EnableAuthWebhook.String())
 	require.Equal(t, credsPath, fromConfig.CredsFile)
 	require.True(t, fromConfig.EnableKafka)
+	require.Equal(t, "config:9093", fromConfig.KafkaAdvertisedAddr)
 
 	t.Setenv("CLEARINGHOUSE_ENABLE_AUTH_WEBHOOK", ":7102")
 	envCredsPath := testCredsFile(t)
 	t.Setenv("CLEARINGHOUSE_CREDS_FILE", envCredsPath)
+	t.Setenv("CLEARINGHOUSE_KAFKA_ADVERTISED_ADDR", "env:9093")
 	fromEnv := read("--config-file", path)
 	require.Equal(t, "127.0.0.1:7102", fromEnv.EnableAuthWebhook.String())
 	require.Equal(t, envCredsPath, fromEnv.CredsFile)
+	require.Equal(t, "env:9093", fromEnv.KafkaAdvertisedAddr)
 
-	got := read("--config-file", path, "--enable-auth-webhook", ":7103", "--creds-file", credsPath, "--unsafe-http-bind")
+	got := read("--config-file", path, "--enable-auth-webhook", ":7103", "--creds-file", credsPath, "--unsafe-http-bind", "--kafka-advertised-addr", "flag:9093")
 	require.Equal(t, "127.0.0.1:7103", got.EnableAuthWebhook.String())
 	require.Equal(t, credsPath, got.CredsFile)
 	require.True(t, got.UnsafeHTTPBind)
+	require.Equal(t, "flag:9093", got.KafkaAdvertisedAddr)
 }

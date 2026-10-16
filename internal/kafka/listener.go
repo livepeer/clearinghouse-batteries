@@ -31,7 +31,7 @@ type Listener struct {
 
 // OpenBroker initializes persistent storage and binds the listener before returning.
 // The caller must run Serve and close the broker, including on startup failure.
-func OpenBroker(ctx context.Context, bind, topic, dir string, credentials []serviceauth.KafkaCredential) (*minikafka.Broker, error) {
+func OpenBroker(ctx context.Context, bind, advertisedAddr, topic, dir string, credentials []serviceauth.KafkaCredential) (*minikafka.Broker, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
 	}
@@ -50,7 +50,7 @@ func OpenBroker(ctx context.Context, bind, topic, dir string, credentials []serv
 		backend.Close()
 		return nil, err
 	}
-	cfg := minikafka.Config{Addr: bind, Store: backend}
+	cfg := minikafka.Config{Addr: bind, AdvertisedAddr: advertisedAddr, Store: backend}
 	if credentials != nil {
 		cfg.SASL, cfg.Authorization = brokerConfig(topic, credentials)
 	}

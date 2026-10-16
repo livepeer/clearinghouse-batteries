@@ -58,6 +58,7 @@ Remove the `operator` entry if you do not need the management API, then start:
   --creds-file /run/secrets/clearinghouse-creds.toml \
   --enable-auth-webhook :8080 \
   --enable-kafka \
+  --kafka-advertised-addr clearinghouse.example.com:9093 \
   --enable-accounting
 ```
 
@@ -245,6 +246,10 @@ flags > environment > configuration file > defaults
 Start with [`config.example.toml`](config.example.toml) or
 [`config.example.json`](config.example.json). Set the credentials file path with
 `--creds-file`, `CLEARINGHOUSE_CREDS_FILE`, or `CredsFile`.
+
+For embedded Kafka behind a proxy such as TLS, set `--kafka-advertised-addr`,
+`CLEARINGHOUSE_KAFKA_ADVERTISED_ADDR`, or `KafkaAdvertisedAddr` to the client-facing
+`host:port`; when empty, it defaults to `KafkaBind`.
 
 Supply the RPC URL via `CLEARINGHOUSE_RPC_URL`, or a file selected by
 `--rpc-url-file`, `CLEARINGHOUSE_RPC_URL_FILE`, or `RPCURLFile`. Direct RPC URL

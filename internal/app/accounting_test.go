@@ -17,6 +17,7 @@ func TestAccountingValidation(t *testing.T) {
 	}{
 		{"missing broker", ServeParams{EnableAccounting: true}, "--kafka-broker required"},
 		{"ambiguous source", ServeParams{EnableKafka: true, KafkaBroker: "broker:9092"}, "cannot be used"},
+		{"advertised without embedded broker", ServeParams{EnableAccounting: true, KafkaBroker: "broker:9092", KafkaAdvertisedAddr: "public:9093"}, "--kafka-advertised-addr requires --enable-kafka"},
 		{"invalid address", ServeParams{EnableAccounting: true, KafkaBroker: "broker"}, "invalid Kafka broker"},
 		{"invalid port", ServeParams{EnableAccounting: true, KafkaBroker: "broker:99999"}, "invalid Kafka broker"},
 		{"empty host", ServeParams{EnableAccounting: true, KafkaBroker: ":9092"}, "invalid Kafka broker"},
@@ -25,6 +26,18 @@ func TestAccountingValidation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			require.ErrorContains(t, tc.p.Validate(), tc.want)
 		})
+	}
+}
+
+func TestKafkaAdvertisedAddrValidation(t *testing.T) {
+	p := ServeParams{EnableKafka: true, CredsFile: "creds.json", KafkaBind: "127.0.0.1:9092", KafkaTopic: "events"}
+	for _, addr := range []string{"", "kafka.example.com:9093", "203.0.113.1:443", "[2001:db8::1]:65535"} {
+		p.KafkaAdvertisedAddr = addr
+		require.NoError(t, p.Validate(), addr)
+	}
+	for _, addr := range []string{"broker", ":9093", "broker:", "broker:0", "broker:65536", "broker:-1", "broker:tls", "broker:+9093", "::1:9093"} {
+		p.KafkaAdvertisedAddr = addr
+		require.ErrorContains(t, p.Validate(), "invalid Kafka advertised address", addr)
 	}
 }
 
@@ -65,7 +78,7 @@ func TestAccountingConfigAndPrecedence(t *testing.T) {
 		})
 	}
 	help := cli(t, "serve", "--help")
-	for _, want := range []string{"--enable-accounting", "--kafka-broker", "CLEARINGHOUSE_ENABLE_ACCOUNTING", "CLEARINGHOUSE_KAFKA_BROKER", "Run embedded Kafka broker", "Run accounting service"} {
+	for _, want := range []string{"--enable-accounting", "--kafka-broker", "--kafka-advertised-addr", "CLEARINGHOUSE_ENABLE_ACCOUNTING", "CLEARINGHOUSE_KAFKA_BROKER", "CLEARINGHOUSE_KAFKA_ADVERTISED_ADDR", "Run embedded Kafka broker", "Run accounting service"} {
 		require.Contains(t, help, want)
 	}
 }

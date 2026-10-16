@@ -21,7 +21,7 @@ func TestBrokerReadWriteUsers(t *testing.T) {
 	read := serviceauth.KafkaCredential{Username: "accounting", Password: "read-secret", Read: true}
 	write := serviceauth.KafkaCredential{Username: "pro\u00adducer", Password: "write-secret", Write: true}
 	access := []serviceauth.KafkaCredential{read, write}
-	broker, err := OpenBroker(ctx, "127.0.0.1:0", "events", t.TempDir(), access)
+	broker, err := OpenBroker(ctx, "127.0.0.1:0", "", "events", t.TempDir(), access)
 	require.NoError(t, err)
 	readerDialer, err := NewDialer(&read)
 	require.NoError(t, err)

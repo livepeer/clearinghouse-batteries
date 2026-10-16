@@ -14,10 +14,11 @@ CredsFile = "/run/secrets/clearinghouse-creds.toml"
 # UnsafeHTTPBind = true
 # Run the HTTP listeners behind a terminating TLS proxy.
 
-# Run a terminating TLS TCP proxy in front of the embedded broker.
-# Producers connect to the proxy's TLS endpoint; accounting connects locally.
+# Run a TLS proxy at KafkaAdvertisedAddr in front of the embedded broker.
+# Producers connect to the TLS endpoint; accounting connects locally.
 KafkaBind = "127.0.0.1:9092"
 KafkaTopic = "livepeer-signing"
+# KafkaAdvertisedAddr = "clearinghouse.example.com:9093"
 
 # The embedded broker accepts SASL/PLAIN and SASL/SCRAM-SHA-512 with separate read
 # and write users from the credentials file. Its connection to the proxy uses

@@ -64,6 +64,7 @@ type ServeParams struct {
 	EnableOnchainListener bool          `optional:"true" descr:"Run on-chain RPC listener"`
 	CredsFile             string        `name:"creds-file" optional:"true" file:"true" descr:"JSON or TOML service credential registry"`
 	KafkaBind             string        `default:"127.0.0.1:9092" descr:"Embedded broker IP:port (loopback or private)"`
+	KafkaAdvertisedAddr   string        `optional:"true" descr:"Embedded broker host:port advertised to clients; defaults to KafkaBind"`
 	KafkaTopic            string        `default:"livepeer-signing" descr:"Kafka topic for issued tickets"`
 	RPCURL                string        `name:"rpc-url" optional:"true" secret:"true" descr:"On-chain RPC URL"`
 	RPCURLFile            string        `name:"rpc-url-file" secretfor:"RPCURL" descr:"File containing the on-chain RPC URL"`
@@ -97,6 +98,16 @@ func (p ServeParams) Validate() error {
 	}
 	if p.EnableKafka && p.KafkaBroker != "" {
 		return errors.New("--kafka-broker cannot be used with --enable-kafka")
+	}
+	if p.KafkaAdvertisedAddr != "" {
+		if !p.EnableKafka {
+			return errors.New("--kafka-advertised-addr requires --enable-kafka")
+		}
+		host, port, err := net.SplitHostPort(p.KafkaAdvertisedAddr)
+		n, portErr := strconv.ParseUint(port, 10, 16)
+		if err != nil || host == "" || portErr != nil || n == 0 {
+			return fmt.Errorf("invalid Kafka advertised address %q: expected host:port with a port between 1 and 65535", p.KafkaAdvertisedAddr)
+		}
 	}
 	if p.EnableAccounting && !p.EnableKafka && p.KafkaBroker == "" {
 		return errors.New("--kafka-broker required for accounting without embedded Kafka")
@@ -209,12 +220,20 @@ func Serve(ctx context.Context, p ServeParams) error {
 	brokerAddr := p.KafkaBroker
 	if p.EnableKafka {
 		var err error
-		broker, err = kafka.OpenBroker(ctx, p.KafkaBind, p.KafkaTopic, filepath.Dir(p.DBPath), access)
+		broker, err = kafka.OpenBroker(ctx, p.KafkaBind, p.KafkaAdvertisedAddr, p.KafkaTopic, filepath.Dir(p.DBPath), access)
 		if err != nil {
 			return err
 		}
 		defer broker.Close()
 		brokerAddr = broker.Addr()
+		if p.EnableAccounting && p.KafkaAdvertisedAddr != "" {
+			// Metadata advertises the client endpoint, but accounting uses the
+			// embedded broker's local plaintext listener for every connection.
+			dial := kafkaDialer.DialFunc
+			kafkaDialer.DialFunc = func(ctx context.Context, network, _ string) (net.Conn, error) {
+				return dial(ctx, network, brokerAddr)
+			}
+		}
 	}
 	k := &kafka.Listener{DB: db, Broker: brokerAddr, Topic: p.KafkaTopic, Dialer: kafkaDialer}
 	c := &chain.Listener{DB: db, Config: p.chainConfig()}

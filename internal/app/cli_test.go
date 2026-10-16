@@ -325,7 +325,7 @@ func TestAllComponentCombinations(t *testing.T) {
 			producerAddr := p.KafkaBind
 			if p.EnableAccounting && !p.EnableKafka {
 				p.CredsFile = testHTTPCredsFile(t)
-				broker, err := kafka.OpenBroker(context.Background(), testutil.Port(t), p.KafkaTopic, filepath.Join(dir, "external"), nil)
+				broker, err := kafka.OpenBroker(context.Background(), testutil.Port(t), "", p.KafkaTopic, filepath.Join(dir, "external"), nil)
 				require.NoError(t, err)
 				brokerCtx, stop := context.WithCancel(context.Background())
 				brokerDone := make(chan error, 1)

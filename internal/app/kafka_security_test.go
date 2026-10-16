@@ -2,8 +2,10 @@ package app
 
 import (
 	"context"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -85,7 +87,7 @@ func TestExternalAccountingUsesRegistryCredential(t *testing.T) {
 	db, err := store.Open(ctx, dbPath, true)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
-	broker, err := kafka.OpenBroker(ctx, "127.0.0.1:0", "events", filepath.Join(dir, "broker"), access)
+	broker, err := kafka.OpenBroker(ctx, "127.0.0.1:0", "", "events", filepath.Join(dir, "broker"), access)
 	require.NoError(t, err)
 	brokerDone := make(chan error, 1)
 	go func() { brokerDone <- broker.Serve(ctx) }()
@@ -115,6 +117,65 @@ func TestExternalAccountingUsesRegistryCredential(t *testing.T) {
 		default:
 		}
 		next, _, _, err := db.Checkpoint(ctx, "kafka", store.KafkaStream("events", 0))
+		require.NoError(t, err)
+		return next == 1
+	})
+}
+
+func TestEmbeddedKafkaAdvertisedAddr(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	p := ServeParams{
+		Common:              Common{DBPath: filepath.Join(t.TempDir(), "accounts.db")},
+		EnableKafka:         true,
+		EnableAccounting:    true,
+		CredsFile:           testCredsFile(t),
+		KafkaBind:           testutil.Port(t),
+		KafkaAdvertisedAddr: "kafka.example.invalid:9093",
+		KafkaTopic:          "events",
+	}
+	db, err := store.Open(ctx, p.DBPath, true)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	done := make(chan error, 1)
+	go func() { done <- Serve(ctx, p) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			require.NoError(t, err)
+		case <-time.After(5 * time.Second):
+			t.Error("embedded Kafka did not stop")
+		}
+	})
+	dialer := &kgo.Dialer{SASLMechanism: plain.Mechanism{Username: "producer", Password: "write-secret"}}
+	host, port, err := net.SplitHostPort(p.KafkaBind)
+	require.NoError(t, err)
+	n, err := strconv.Atoi(port)
+	require.NoError(t, err)
+	var conn *kgo.Conn
+	testutil.Eventually(t, func() bool {
+		conn, err = dialer.DialPartition(ctx, "tcp", p.KafkaBind, kgo.Partition{Topic: p.KafkaTopic, Leader: kgo.Broker{Host: host, Port: n}})
+		return err == nil
+	})
+	defer conn.Close()
+	require.NoError(t, conn.SetDeadline(time.Now().Add(5*time.Second)))
+	partitions, err := conn.ReadPartitions(p.KafkaTopic)
+	require.NoError(t, err)
+	require.Len(t, partitions, 1)
+	require.Equal(t, p.KafkaAdvertisedAddr, net.JoinHostPort(partitions[0].Leader.Host, strconv.Itoa(partitions[0].Leader.Port)))
+	// Write directly to the local partition. Accounting must follow the
+	// advertised leader back to the local listener without resolving it.
+	_, err = conn.WriteMessages(kgo.Message{Value: []byte(`{"id":"advertised","type":"other","data":{}}`)})
+	require.NoError(t, err)
+	testutil.Eventually(t, func() bool {
+		select {
+		case err := <-done:
+			done <- err
+			t.Fatalf("accounting stopped before processing the event: %v", err)
+		default:
+		}
+		next, _, _, err := db.Checkpoint(ctx, "kafka", store.KafkaStream(p.KafkaTopic, 0))
 		require.NoError(t, err)
 		return next == 1
 	})
