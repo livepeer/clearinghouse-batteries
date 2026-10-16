@@ -3,15 +3,21 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Keep main and release builds independent so each successful commit can publish.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CGO_ENABLED: "1"
@@ -22,11 +28,39 @@ jobs:
     name: Test, vet, and build
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      tag: ${{ steps.metadata.outputs.tag }}
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Build metadata
+        id: metadata
+        env:
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          release=$(< VERSION)
+          [[ "$release" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+            echo 'VERSION must be MAJOR.MINOR.PATCH, without a v prefix or suffixes.' >&2
+            exit 1
+          }
+          version="v$release-${GITHUB_SHA:0:12}"
+          tag="sha-$GITHUB_SHA"
+          if [[ -n "$RELEASE_TAG" ]]; then
+            if [[ "$RELEASE_TAG" != "v$release" ]]; then
+              echo "Only stable releases matching VERSION (v$release) are supported." >&2
+              exit 1
+            fi
+            version="$RELEASE_TAG"
+            tag="$RELEASE_TAG-sha-$GITHUB_SHA"
+          fi
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -56,3 +90,141 @@ jobs:
 
       - name: Build
         run: make build
+
+  docker-build:
+    name: Docker Linux ${{ matrix.arch }}
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-26.04
+          - arch: arm64
+            runner: ubuntu-26.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: examples/compose/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          tags: clearinghouse:test-${{ matrix.arch }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.check.outputs.version }}
+          cache-from: type=gha,scope=docker-${{ matrix.arch }}
+          cache-to: type=gha,scope=docker-${{ matrix.arch }},mode=max
+
+      - name: Smoke test image
+        env:
+          IMAGE: clearinghouse:test-${{ matrix.arch }}
+        run: |
+          docker run --rm --network none --read-only --tmpfs /tmp:rw,mode=1777 \
+            "$IMAGE" migrate up --db-path /tmp/clearinghouse.db
+
+      - name: Export tested image
+        if: github.event_name == 'push'
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: docker save --output "$RUNNER_TEMP/docker-$ARCH.tar" "clearinghouse:test-$ARCH"
+
+      - name: Save tested image
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: docker-linux-${{ matrix.arch }}
+          path: ${{ runner.temp }}/docker-${{ matrix.arch }}.tar
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  docker-publish:
+    name: Publish Docker
+    needs: [check, docker-build]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-26.04
+    environment: docker-publish
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    concurrency:
+      group: docker-publish
+      cancel-in-progress: false
+      queue: max
+    env:
+      IMAGE: docker.io/livepeer/clearinghouse
+      COMMIT: ${{ github.sha }}
+      IMAGE_VERSION: ${{ needs.check.outputs.version }}
+      IMAGE_TAG: ${{ needs.check.outputs.tag }}
+      RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Download tested images
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: docker-linux-*
+          path: images
+          merge-multiple: true
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Publish and promote tested images
+        run: |
+          for arch in amd64 arm64; do
+            docker load --input "images/docker-$arch.tar"
+            source="clearinghouse:test-$arch"
+            test "$(docker image inspect --platform "linux/$arch" --format '{{.Os}}/{{.Architecture}}' "$source")" = "linux/$arch"
+            test "$(docker image inspect --platform "linux/$arch" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$source")" = "$COMMIT"
+            test "$(docker image inspect --platform "linux/$arch" --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$source")" = "$IMAGE_VERSION"
+            docker tag "$source" "$IMAGE:$IMAGE_TAG-$arch"
+            docker push "$IMAGE:$IMAGE_TAG-$arch"
+          done
+          docker buildx imagetools create --tag "$IMAGE:$IMAGE_TAG" \
+            --metadata-file "$RUNNER_TEMP/manifest.json" \
+            "$IMAGE:$IMAGE_TAG-amd64" "$IMAGE:$IMAGE_TAG-arm64"
+          digest=$(jq -er '."containerimage.descriptor".digest' "$RUNNER_TEMP/manifest.json")
+          docker buildx imagetools inspect --raw "$IMAGE@$digest" | \
+            jq -e '[.manifests[].platform | .os + "/" + .architecture] | sort == ["linux/amd64", "linux/arm64"]'
+          echo "Published \`$IMAGE:$IMAGE_TAG\` (\`$digest\`)." >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ -z "$RELEASE_TAG" ]]; then
+            head=$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq .object.sha)
+            if [[ "$head" != "$COMMIT" ]]; then
+              echo "Skipping main tag: $COMMIT is no longer the head of main." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            tags=(main)
+          else
+            test "$(gh api "repos/$GH_REPO/commits/refs/tags/$RELEASE_TAG" --jq .sha)" = "$COMMIT"
+            if ! gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+              gh release create "$RELEASE_TAG" --verify-tag --generate-notes --title "$RELEASE_TAG"
+            fi
+            test "$(gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" --jq '.draft == false and .prerelease == false')" = true
+            tags=("$RELEASE_TAG")
+            latest=$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name)
+            if [[ "$latest" == "$RELEASE_TAG" ]]; then
+              tags+=(latest)
+            fi
+          fi
+          for tag in "${tags[@]}"; do
+            docker buildx imagetools create --tag "$IMAGE:$tag" "$IMAGE@$digest"
+            echo "Promoted \`$IMAGE:$tag\` to \`$IMAGE@$digest\`." >> "$GITHUB_STEP_SUMMARY"
+          done

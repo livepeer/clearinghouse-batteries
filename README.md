@@ -440,4 +440,7 @@ Builds require Go 1.27.2, CGO, and a C compiler for SQLite. `make check` runs
 race-enabled tests, `go vet`, and a production build. Tests use local fixtures
 without a live chain or production credentials.
 
+To release, set `VERSION` to the next `MAJOR.MINOR.PATCH` number. Commit it, then run
+`./release.sh <remote>`.
+
 See [SECURITY.md](SECURITY.md) for deployment security.

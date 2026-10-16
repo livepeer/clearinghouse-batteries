@@ -21,3 +21,9 @@ updates:
       github-actions:
         patterns:
           - "*"
+
+  - package-ecosystem: docker
+    directory: /examples/compose
+    schedule:
+      interval: weekly
+      day: monday
