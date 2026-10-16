@@ -215,7 +215,14 @@ jobs:
           else
             test "$(gh api "repos/$GH_REPO/commits/refs/tags/$RELEASE_TAG" --jq .sha)" = "$COMMIT"
             if ! gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
-              gh release create "$RELEASE_TAG" --verify-tag --generate-notes --title "$RELEASE_TAG"
+              {
+                printf '## Docker image\n\n'
+                printf '[Docker Hub](https://hub.docker.com/r/%s/tags?name=%s) — Linux amd64 and arm64.\n\n' "${IMAGE#docker.io/}" "$RELEASE_TAG"
+                printf '```sh\ndocker pull %s:%s\n```\n\n' "$IMAGE" "$RELEASE_TAG"
+                printf 'Pin this build by digest:\n\n```sh\ndocker pull %s@%s\n```\n' "$IMAGE" "$digest"
+              } > "$RUNNER_TEMP/release-notes.md"
+              gh release create "$RELEASE_TAG" --verify-tag --generate-notes --title "$RELEASE_TAG" \
+                --notes-file "$RUNNER_TEMP/release-notes.md"
             fi
             test "$(gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" --jq '.draft == false and .prerelease == false')" = true
             tags=("$RELEASE_TAG")
