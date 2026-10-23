@@ -128,7 +128,7 @@ func (r *Registry) add(entries []entry) error {
 			credential := KafkaCredential{Username: item.Kafka.Username, Password: item.Secret,
 				Read: slices.Contains(p.allow, "read"), Write: slices.Contains(p.allow, "write"), Accounting: item.Kafka.Accounting}
 			if credential.Accounting && !credential.Read {
-				return fmt.Errorf("Kafka accounting credential %q requires read", item.ID)
+				return fmt.Errorf("kafka accounting credential %q requires read", item.ID)
 			}
 			r.kafka = append(r.kafka, credential)
 		default:

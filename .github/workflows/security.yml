@@ -1,9 +1,7 @@
 name: Vulnerability scan
 
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_call:
   schedule:
     - cron: "23 8 * * 1"
   workflow_dispatch:
@@ -12,17 +10,18 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: govulncheck-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CGO_ENABLED: "1"
   GOFLAGS: -mod=readonly
+  GOTOOLCHAIN: local
 
 jobs:
   govulncheck:
     name: Check Go vulnerabilities
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - name: Check out source
@@ -30,12 +29,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Run govulncheck
-        uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          repo-checkout: false
-          # Clear the action's default "stable" so go.mod selects the toolchain.
-          go-version-input: ""
           go-version-file: go.mod
           cache-dependency-path: go.sum
-          go-package: ./...
+
+      - name: Run govulncheck
+        run: make vulncheck

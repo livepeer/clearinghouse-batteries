@@ -32,7 +32,7 @@ func Handler(db *store.Store, registry *serviceauth.Registry) http.Handler {
 		decision, err := db.Authorize(r.Context(), body)
 		if err != nil {
 			slog.Error("authorize failed", "error", err)
-			http.Error(w, "authorization unavailable", 503)
+			http.Error(w, "authorization unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")

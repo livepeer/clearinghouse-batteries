@@ -65,7 +65,7 @@ func OpenBroker(ctx context.Context, bind, advertisedAddr, topic, dir string, cr
 func (l *Listener) Run(ctx context.Context) error {
 	defer l.Ready.Store(false)
 	if l.Broker == "" {
-		return errors.New("Kafka broker address required")
+		return errors.New("kafka broker address required")
 	}
 	partitions, err := l.partitions(ctx)
 	if err != nil {
@@ -110,10 +110,10 @@ func (l *Listener) openReader(ctx context.Context, partition int) (*kgo.Reader, 
 	}
 	first, last, err := l.offsets(ctx, partition)
 	if err != nil {
-		return nil, 0, fmt.Errorf("Kafka topic %s partition %d offsets: %w", l.Topic, partition, err)
+		return nil, 0, fmt.Errorf("kafka topic %s partition %d offsets: %w", l.Topic, partition, err)
 	}
 	if next < first || next > last {
-		return nil, 0, fmt.Errorf("Kafka topic %s partition %d checkpoint %d outside retained offsets [%d,%d]; broker data was lost or replaced", l.Topic, partition, next, first, last)
+		return nil, 0, fmt.Errorf("kafka topic %s partition %d checkpoint %d outside retained offsets [%d,%d]; broker data was lost or replaced", l.Topic, partition, next, first, last)
 	}
 	reader := kgo.NewReader(kgo.ReaderConfig{
 		Brokers:               []string{l.Broker},
@@ -142,13 +142,13 @@ func (l *Listener) readPartition(ctx context.Context, reader *kgo.Reader, next i
 			return nil
 		}
 		if err != nil {
-			return fmt.Errorf("Kafka topic %s partition %d: %w", l.Topic, partition, err)
+			return fmt.Errorf("kafka topic %s partition %d: %w", l.Topic, partition, err)
 		}
 		if msg.Offset != next {
-			return fmt.Errorf("Kafka offset gap for %s partition %d: expected %d, received %d", l.Topic, partition, next, msg.Offset)
+			return fmt.Errorf("kafka offset gap for %s partition %d: expected %d, received %d", l.Topic, partition, next, msg.Offset)
 		}
 		if err := l.DB.Ingest(ctx, l.Topic, partition, msg.Offset, msg.Value); err != nil {
-			return fmt.Errorf("Kafka topic %s partition %d: %w", l.Topic, partition, err)
+			return fmt.Errorf("kafka topic %s partition %d: %w", l.Topic, partition, err)
 		}
 		next++
 	}
@@ -175,7 +175,7 @@ func (l *Listener) partitions(ctx context.Context) ([]int, error) {
 		}
 	}
 	if len(partitions) == 0 {
-		return nil, fmt.Errorf("Kafka topic %s has no partitions", l.Topic)
+		return nil, fmt.Errorf("kafka topic %s has no partitions", l.Topic)
 	}
 	slices.Sort(partitions)
 	return slices.Compact(partitions), nil

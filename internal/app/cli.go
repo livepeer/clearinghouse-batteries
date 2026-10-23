@@ -12,6 +12,7 @@ import (
 	"github.com/j0sh/boa/pkg/boa"
 	"github.com/livepeer/clearinghouse/internal/store"
 	"github.com/livepeer/clearinghouse/internal/units"
+	"github.com/livepeer/clearinghouse/internal/version"
 	"github.com/livepeer/clearinghouse/migrations"
 	"github.com/spf13/cobra"
 )
@@ -96,7 +97,7 @@ func statusValues(values string) boa.ParamEnricher {
 }
 
 func Root(out, errOut io.Writer) *cobra.Command {
-	root := &cobra.Command{Use: "clearinghouse", Short: "Livepeer grant accounting", SilenceErrors: true, SilenceUsage: true}
+	root := &cobra.Command{Use: "clearinghouse", Short: "Livepeer grant accounting", Version: version.String(), SilenceErrors: true, SilenceUsage: true}
 	root.SetOut(out)
 	root.SetErr(errOut)
 	root.AddCommand(command[ServeParams]("serve", "Run selected online integrations", func(p *ServeParams, c *cobra.Command) error { return Serve(c.Context(), *p) }))

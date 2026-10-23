@@ -234,11 +234,11 @@ func (l *Listener) resolveTicketBroker(ctx context.Context, controller common.Ad
 		return common.Address{}, fmt.Errorf("decode TicketBroker from Livepeer Controller: %w", err)
 	}
 	if len(values) != 1 {
-		return common.Address{}, errors.New("Livepeer Controller returned an invalid TicketBroker result")
+		return common.Address{}, errors.New("the Livepeer Controller returned an invalid TicketBroker result")
 	}
 	contract, ok := values[0].(common.Address)
 	if !ok || contract == (common.Address{}) {
-		return common.Address{}, errors.New("Livepeer Controller returned an empty TicketBroker address")
+		return common.Address{}, errors.New("the Livepeer Controller returned an empty TicketBroker address")
 	}
 	return contract, nil
 }

@@ -139,11 +139,11 @@ func (p ServeParams) Validate() error {
 		}
 		n, err := strconv.Atoi(port)
 		if err != nil || n < 1 || n > 65535 {
-			return errors.New("Kafka requires a fixed TCP port between 1 and 65535")
+			return errors.New("kafka requires a fixed TCP port between 1 and 65535")
 		}
 		ip := net.ParseIP(host)
 		if ip == nil || (!ip.IsLoopback() && !ip.IsPrivate()) {
-			return errors.New("Kafka bind must be a concrete loopback or private IP (no public or wildcard bind)")
+			return errors.New("kafka bind must be a concrete loopback or private IP (no public or wildcard bind)")
 		}
 	}
 	if p.EnableOnchainListener {

@@ -65,7 +65,7 @@ func (s *Store) Ingest(ctx context.Context, topic string, partition int, offset 
 			return nil
 		}
 		if offset > next {
-			return fmt.Errorf("Kafka offset gap for %s partition %d: expected %d, received %d", topic, partition, next, offset)
+			return fmt.Errorf("kafka offset gap for %s partition %d: expected %d, received %d", topic, partition, next, offset)
 		}
 		uid, now := ID(), time.Now().UnixMilli()
 		status, reason := "applied", ""

@@ -442,8 +442,9 @@ backups as described in [SECURITY.md](SECURITY.md).
 ## Development
 
 Builds require Go 1.27.3, CGO, and a C compiler for SQLite. `make check` runs
-race-enabled tests, `go vet`, and a production build. Tests use local fixtures
-without a live chain or production credentials.
+race-enabled tests, `go vet`, Staticcheck, a vulnerability scan, and a production
+build. Tests use local fixtures without a live chain or production credentials.
+Run `./bin/clearinghouse --version` to inspect the version and source commit.
 
 To release, set `VERSION` to the next `MAJOR.MINOR.PATCH` number. Commit it, then run
 `./release.sh <remote>`.

@@ -33,7 +33,7 @@ func NewDialer(credential *serviceauth.KafkaCredential) (*kgo.Dialer, error) {
 		return nil, nil
 	}
 	if credential.Username == "" || credential.Password == "" {
-		return nil, errors.New("Kafka accounting username and password are required")
+		return nil, errors.New("kafka accounting username and password are required")
 	}
 	mechanism, err := scram.Mechanism(scram.SHA512, credential.Username, credential.Password)
 	if err != nil {
