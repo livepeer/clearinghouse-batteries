@@ -148,9 +148,8 @@ jobs:
     permissions:
       contents: read
       packages: write
-    # Keep pending promotions: an older build may finish after the newest one.
     concurrency:
-      group: docker-${{ github.event.workflow_run.head_branch }}-promotion
+      group: docker-${{ github.event.workflow_run.head_branch == 'main' && 'main' || 'release' }}-promotion
       cancel-in-progress: false
       queue: max
     steps:
