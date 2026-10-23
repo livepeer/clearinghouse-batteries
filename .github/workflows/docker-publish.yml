@@ -1,0 +1,198 @@
+name: Publish Docker
+
+# Publish images triggered by release builds on main or version tags
+on:
+  workflow_run:
+    workflows: [Release]
+    branches: [main, 'v*']
+    types: [completed]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  publish:
+    if: >-
+      github.event.workflow_run.event == 'push' &&
+      (github.event.workflow_run.head_branch == 'main' || startsWith(github.event.workflow_run.head_branch, 'v')) &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-26.04
+    environment: docker-publish
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+    outputs:
+      ghcr_digest: ${{ steps.publish.outputs.ghcr_digest }}
+      dockerhub_digest: ${{ steps.publish.outputs.dockerhub_digest }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+          pattern: docker-linux-*
+          path: images
+          merge-multiple: true
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Log in to Docker Hub
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: docker.io
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Publish tested images and manifests
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          COMMIT: ${{ github.event.workflow_run.head_sha }}
+          REF_NAME: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          repository=$(printf '%s' "$REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          ghcr_image="ghcr.io/$repository"
+          dockerhub_image="docker.io/livepeer/clearinghouse"
+          tag="sha-$COMMIT"
+          if [[ "$REF_NAME" != main ]]; then
+            [[ "$REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+              echo "Invalid release tag: $REF_NAME" >&2
+              exit 1
+            }
+            test "$(gh api "repos/$REPOSITORY/commits/refs/tags/$REF_NAME" --jq .sha)" = "$COMMIT"
+            # Release binaries embed a different version than main at the same commit.
+            tag="$REF_NAME-$tag"
+          fi
+          for arch in amd64 arm64; do
+            docker load --input "images/docker-$arch.tar"
+            test "$(docker image inspect --platform "linux/$arch" --format '{{.Os}}/{{.Architecture}}' "clearinghouse:test-$arch")" = "linux/$arch"
+            test "$(docker image inspect --platform "linux/$arch" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "clearinghouse:test-$arch")" = "$COMMIT"
+            if [[ "$REF_NAME" != main ]]; then
+              test "$(docker image inspect --platform "linux/$arch" --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "clearinghouse:test-$arch")" = "$REF_NAME"
+            fi
+            for image in "$ghcr_image" "$dockerhub_image"; do
+              docker tag "clearinghouse:test-$arch" "$image:$tag-$arch"
+              docker push "$image:$tag-$arch"
+            done
+          done
+          publish_manifest() {
+            local registry=$1 image=$2 digest
+            docker buildx imagetools create --tag "$image:$tag" \
+              --metadata-file "$RUNNER_TEMP/$registry-manifest.json" \
+              "$image:$tag-amd64" "$image:$tag-arm64"
+            digest=$(jq -er '."containerimage.descriptor".digest' "$RUNNER_TEMP/$registry-manifest.json")
+            docker buildx imagetools inspect --raw "$image@$digest" | \
+              jq -e '[.manifests[] | select(.annotations["vnd.docker.reference.type"] != "attestation-manifest") | .platform.os + "/" + .platform.architecture] | sort == ["linux/amd64", "linux/arm64"]'
+            echo "${registry}_digest=$digest" >> "$GITHUB_OUTPUT"
+            echo "Published \`$image:$tag\` (\`$digest\`)." >> "$GITHUB_STEP_SUMMARY"
+          }
+          publish_manifest ghcr "$ghcr_image"
+          publish_manifest dockerhub "$dockerhub_image"
+
+  verify:
+    name: Pull Linux ${{ matrix.arch }}
+    needs: publish
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-26.04
+          - arch: arm64
+            runner: ubuntu-26.04-arm
+    runs-on: ${{ matrix.runner }}
+    environment: docker-publish
+    timeout-minutes: 10
+    permissions:
+      packages: read
+    steps:
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Log in to Docker Hub
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: docker.io
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Pull and run published image
+        env:
+          REPOSITORY: ${{ github.repository }}
+          GHCR_DIGEST: ${{ needs.publish.outputs.ghcr_digest }}
+          DOCKERHUB_DIGEST: ${{ needs.publish.outputs.dockerhub_digest }}
+          COMMIT: ${{ github.event.workflow_run.head_sha }}
+          PLATFORM: linux/${{ matrix.arch }}
+        run: |
+          repository=$(printf '%s' "$REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          for reference in "ghcr.io/$repository@$GHCR_DIGEST" "docker.io/livepeer/clearinghouse@$DOCKERHUB_DIGEST"; do
+            docker pull --platform "$PLATFORM" "$reference"
+            version=$(docker image inspect --platform "$PLATFORM" --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$reference")
+            test "$(docker run --rm --network none --platform "$PLATFORM" "$reference" --version)" = "clearinghouse version $version ($COMMIT)"
+          done
+
+  promote:
+    needs: [publish, verify]
+    runs-on: ubuntu-26.04
+    environment: docker-publish
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    # Keep pending promotions: an older build may finish after the newest one.
+    concurrency:
+      group: docker-${{ github.event.workflow_run.head_branch }}-promotion
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Log in to Docker Hub
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: docker.io
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Promote verified images
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          COMMIT: ${{ github.event.workflow_run.head_sha }}
+          REF_NAME: ${{ github.event.workflow_run.head_branch }}
+          GHCR_DIGEST: ${{ needs.publish.outputs.ghcr_digest }}
+          DOCKERHUB_DIGEST: ${{ needs.publish.outputs.dockerhub_digest }}
+        run: |
+          if [[ "$REF_NAME" == main ]]; then
+            head=$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq .object.sha)
+            if [[ "$head" != "$COMMIT" ]]; then
+              echo "Skipping main tag: $COMMIT is no longer the head of main." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+          fi
+          tags=("$REF_NAME")
+          if [[ "$REF_NAME" != main ]]; then
+            latest=$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name)
+            if [[ "$latest" == "$REF_NAME" ]]; then
+              tags+=(latest)
+            fi
+          fi
+          repository=$(printf '%s' "$GH_REPO" | tr '[:upper:]' '[:lower:]')
+          for reference in "ghcr.io/$repository@$GHCR_DIGEST" "docker.io/livepeer/clearinghouse@$DOCKERHUB_DIGEST"; do
+            image=${reference%@*}
+            for tag in "${tags[@]}"; do
+              docker buildx imagetools create --tag "$image:$tag" "$reference"
+              echo "Promoted \`$image:$tag\` to \`$COMMIT\` (\`$reference\`)." >> "$GITHUB_STEP_SUMMARY"
+            done
+          done

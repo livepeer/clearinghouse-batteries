@@ -1,7 +1,6 @@
 name: Vulnerability scan
 
 on:
-  workflow_call:
   schedule:
     - cron: "23 8 * * 1"
   workflow_dispatch:
