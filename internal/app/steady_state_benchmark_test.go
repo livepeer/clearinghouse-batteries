@@ -413,7 +413,7 @@ func setupBenchmarkCredentials(ctx context.Context, path string, layout benchmar
 		state := fmt.Sprintf("benchmark-state-%d", i)
 		request := store.AuthRequest{
 			Headers: http.Header{"Authorization": []string{"Bearer " + key}},
-			State:   &store.RemoteState{StateID: state, App: "benchmark", Type: "live", OrchestratorAddress: testutil.Orch},
+			State:   &store.RemoteState{StateID: state, App: "benchmark", Type: "live", OrchestratorAddress: testutil.Orch, FeeWei: "1"},
 		}
 		decision, err := db.Authorize(ctx, request)
 		if err != nil {

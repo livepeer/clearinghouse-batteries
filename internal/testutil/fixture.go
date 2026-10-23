@@ -45,7 +45,7 @@ func NewCurrency(t *testing.T, amount, currency string) *Fixture {
 	require.NoError(t, err)
 	f.KeyID, f.Key, err = f.DB.CreateKey(ctx, f.Allocation, "test key")
 	require.NoError(t, err)
-	f.Request = store.AuthRequest{Headers: http.Header{"Authorization": []string{"Bearer " + f.Key}}, State: &store.RemoteState{StateID: "state-1", PMSessionID: PM, OrchestratorAddress: Orch, App: "test-app", Type: "live"}}
+	f.Request = store.AuthRequest{Headers: http.Header{"Authorization": []string{"Bearer " + f.Key}}, State: &store.RemoteState{StateID: "state-1", PMSessionID: PM, OrchestratorAddress: Orch, App: "test-app", Type: "live", FeeWei: "1", FeeUSD: "0.000000000000000001"}}
 	d, err := f.DB.Authorize(ctx, f.Request)
 	require.NoError(t, err)
 	if d.Status != 200 {

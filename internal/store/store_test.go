@@ -17,6 +17,7 @@ import (
 
 	"github.com/livepeer/clearinghouse/internal/store"
 	"github.com/livepeer/clearinghouse/internal/testutil"
+	"github.com/livepeer/clearinghouse/internal/units"
 	"github.com/livepeer/clearinghouse/migrations"
 	"github.com/stretchr/testify/require"
 )
@@ -51,7 +52,7 @@ func TestAuthorizeAcceptsUnderscoreInBase64URLKeyID(t *testing.T) {
 	require.NoError(t, err)
 	req := store.AuthRequest{
 		Headers: http.Header{"Authorization": []string{"Bearer " + key}},
-		State:   &store.RemoteState{StateID: "state-underscore", OrchestratorAddress: testutil.Orch, App: "test-app", Type: "live"},
+		State:   &store.RemoteState{StateID: "state-underscore", OrchestratorAddress: testutil.Orch, App: "test-app", Type: "live", FeeWei: "1"},
 	}
 	decision, err := f.DB.Authorize(context.Background(), req)
 	require.NoError(t, err)
@@ -561,41 +562,61 @@ func TestConcurrentSpendsNeverLoseCharges(t *testing.T) {
 	assertBalanced(t, f.DB)
 }
 
-func TestAllocationExhaustionIsAutomatic(t *testing.T) {
-	for _, pause := range []bool{false, true} {
-		t.Run(fmt.Sprint("pause=", pause), func(t *testing.T) {
-			f := testutil.New(t, "100")
-			ctx := t.Context()
-			status := func(want string, authStatus int) {
-				t.Helper()
-				var got string
-				require.NoError(t, f.DB.DB.QueryRow(`SELECT status FROM grant_allocations WHERE id=?`, f.Allocation).Scan(&got))
-				require.Equal(t, want, got)
-				decision, err := f.DB.Authorize(ctx, f.Request)
+func TestAllocationBalanceAndAuthorization(t *testing.T) {
+	for _, currency := range []string{"eth", "usd"} {
+		for _, pause := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/pause=%t", currency, pause), func(t *testing.T) {
+				f := testutil.NewCurrency(t, "10000000000000000", currency) // 0.01
+				ctx := t.Context()
+				status := func(want string, authStatus int) {
+					t.Helper()
+					decision, err := f.DB.Authorize(ctx, f.Request)
+					require.NoError(t, err)
+					require.Equal(t, authStatus, decision.Status)
+					var got string
+					require.NoError(t, f.DB.DB.QueryRow(`SELECT status FROM grant_allocations WHERE id=?`, f.Allocation).Scan(&got))
+					require.Equal(t, want, got)
+				}
+				require.ErrorIs(t, f.DB.SetStatus(ctx, "allocation", f.Allocation, "exhausted"), store.ErrInvalidManagementInput)
+				status("active", http.StatusOK)
+				for _, tc := range []struct {
+					fee    string
+					status int
+				}{{"0.01", 200}, {"0.010000000000000001", 402}, {"", 400}} {
+					f.Request.State.FeeWei, _ = units.DecimalToUnits(tc.fee, currency)
+					f.Request.State.FeeUSD = tc.fee
+					if currency == "usd" {
+						f.Request.State.FeeWei = "1"
+					}
+					status("active", tc.status)
+				}
+				f.Request.State.FeeWei = "1"
+				f.Request.State.FeeUSD = "0.000000000000000001"
+				balance, err := store.BalanceCurrency(ctx, f.DB.DB, "allocation_available", f.Allocation, currency)
 				require.NoError(t, err)
-				require.Equal(t, authStatus, decision.Status)
-			}
-			require.ErrorIs(t, f.DB.SetStatus(ctx, "allocation", f.Allocation, "exhausted"), store.ErrInvalidManagementInput)
-			status("active", http.StatusOK)
-			balance, err := store.Balance(ctx, f.DB.DB, "allocation_available", f.Allocation)
-			require.NoError(t, err)
-			require.Equal(t, "100", balance.String())
+				require.Equal(t, "10000000000000000", balance.String())
 
-			require.NoError(t, f.DB.Ingest(ctx, "exhaustion", 0, 0, f.Event(t, "spent", "100", testutil.PM)))
-			status("exhausted", http.StatusPaymentRequired)
-			require.ErrorIs(t, f.DB.SetStatus(ctx, "allocation", f.Allocation, "exhausted"), store.ErrInvalidManagementInput)
-			require.ErrorIs(t, f.DB.SetStatus(ctx, "allocation", f.Allocation, "active"), store.ErrManagementConflict)
-			if pause {
-				require.NoError(t, f.DB.SetStatus(ctx, "allocation", f.Allocation, "paused"))
-				status("paused", http.StatusForbidden)
-			}
-			require.NoError(t, f.DB.Fund(ctx, "grant", f.Grant, "25"))
-			require.NoError(t, f.DB.Fund(ctx, "allocation", f.Allocation, "25"))
-			if pause {
-				status("paused", http.StatusForbidden)
-				require.NoError(t, f.DB.SetStatus(ctx, "allocation", f.Allocation, "active"))
-			}
-			status("active", http.StatusOK)
-		})
+				var event map[string]any
+				require.NoError(t, json.Unmarshal(f.Event(t, "spent", "10000000000000000", testutil.PM), &event))
+				event["data"].(map[string]any)["computed_fee_usd"] = "0.01"
+				raw, err := json.Marshal(event)
+				require.NoError(t, err)
+				require.NoError(t, f.DB.Ingest(ctx, "exhaustion", 0, 0, raw))
+				status("exhausted", http.StatusPaymentRequired)
+				require.ErrorIs(t, f.DB.SetStatus(ctx, "allocation", f.Allocation, "exhausted"), store.ErrInvalidManagementInput)
+				require.ErrorIs(t, f.DB.SetStatus(ctx, "allocation", f.Allocation, "active"), store.ErrManagementConflict)
+				if pause {
+					require.NoError(t, f.DB.SetStatus(ctx, "allocation", f.Allocation, "paused"))
+					status("paused", http.StatusForbidden)
+				}
+				require.NoError(t, f.DB.FundCurrency(ctx, "grant", f.Grant, "25", currency))
+				require.NoError(t, f.DB.FundCurrency(ctx, "allocation", f.Allocation, "25", currency))
+				if pause {
+					status("paused", http.StatusForbidden)
+					require.NoError(t, f.DB.SetStatus(ctx, "allocation", f.Allocation, "active"))
+				}
+				status("active", http.StatusOK)
+			})
+		}
 	}
 }

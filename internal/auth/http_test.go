@@ -87,7 +87,7 @@ func TestSignerWebhook(t *testing.T) {
 	if d.Status != 403 {
 		t.Fatal(d)
 	}
-	f.Request.State = &store.RemoteState{StateID: "new-state", App: "test-app", Type: "live", OrchestratorAddress: testutil.Orch}
+	f.Request.State = &store.RemoteState{StateID: "new-state", App: "test-app", Type: "live", OrchestratorAddress: testutil.Orch, FeeWei: "1"}
 	_, d = call("signer-token", f.Request)
 	if d.Status != 200 {
 		t.Fatal(d)

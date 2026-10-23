@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/livepeer/clearinghouse/internal/units"
 )
 
 // RemoteState mirrors the current signer webhook's state; additional signer fields are ignored.
@@ -21,6 +23,8 @@ type RemoteState struct {
 	App                 string
 	Type                string
 	AuthID              string
+	FeeWei              string
+	FeeUSD              string
 }
 type AuthRequest struct {
 	Headers http.Header  `json:"headers"`
@@ -112,6 +116,7 @@ type authorizationSnapshot struct {
 	revoked, start, end, grantStart, grantEnd, lastUsed sql.NullInt64
 	id, key, app, paymentType, orchestrator, status     string
 	lastSeen                                            int64
+	currency                                            string
 }
 
 // A single SELECT supplies a consistent snapshot without BEGIN IMMEDIATE,
@@ -120,7 +125,7 @@ func readAuthorization(ctx context.Context, q querier, key, state string) (autho
 	var a authorizationSnapshot
 	err := q.QueryRowContext(ctx, `
 SELECT k.secret_hash,k.allocation_id,k.revoked_at_ms,k.last_used_at_ms,
- a.status,g.status,a.starts_at_ms,a.ends_at_ms,g.starts_at_ms,g.ends_at_ms,
+ a.status,g.status,a.starts_at_ms,a.ends_at_ms,g.starts_at_ms,g.ends_at_ms,a.currency,
  coalesce(b.balance_units,'0'),coalesce(s.id,''),coalesce(s.api_key_id,''),
  coalesce(s.app,''),coalesce(s.payment_type,''),coalesce(s.orchestrator,''),
  coalesce(s.status,''),coalesce(s.last_seen_at_ms,0)
@@ -129,7 +134,7 @@ FROM api_keys k JOIN grant_allocations a ON a.id=k.allocation_id
  LEFT JOIN account_balances b ON b.account_type='allocation_available' AND b.account_id=a.id AND b.currency=a.currency
  LEFT JOIN payment_sessions s ON s.state_id=?
 WHERE k.id=?`, state, key).Scan(&a.saved, &a.allocation, &a.revoked, &a.lastUsed,
-		&a.allocationStatus, &a.grantStatus, &a.start, &a.end, &a.grantStart, &a.grantEnd,
+		&a.allocationStatus, &a.grantStatus, &a.start, &a.end, &a.grantStart, &a.grantEnd, &a.currency,
 		&a.balance, &a.id, &a.key, &a.app, &a.paymentType, &a.orchestrator, &a.status, &a.lastSeen)
 	if errors.Is(err, sql.ErrNoRows) {
 		return a, nil
@@ -150,6 +155,20 @@ func (a authorizationSnapshot) decide(state *RemoteState, key string, hash [32]b
 	}
 	if a.allocationStatus == "exhausted" || balance.Sign() <= 0 {
 		return Decision{Status: 402, Reason: "allocation exhausted"}, nil
+	}
+	fee := state.FeeWei
+	if a.currency == "usd" {
+		fee, err = units.DecimalToUnits(state.FeeUSD, "USD")
+		if err != nil {
+			return Decision{Status: 400, Reason: "invalid USD payment fee"}, nil
+		}
+	}
+	amount, err := Amount(fee)
+	if err != nil {
+		return Decision{Status: 400, Reason: "invalid payment fee"}, nil
+	}
+	if balance.Cmp(amount) < 0 {
+		return Decision{Status: 402, Reason: "insufficient allocation balance"}, nil
 	}
 	orch, err := Address(state.OrchestratorAddress)
 	if err != nil {
