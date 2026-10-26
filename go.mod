@@ -4,7 +4,7 @@ go 1.27.3
 
 require (
 	github.com/BurntSushi/toml v1.6.0
-	github.com/ethereum/go-ethereum v1.17.8
+	github.com/ethereum/go-ethereum v1.17.9
 	github.com/j0sh/boa v1.0.2
 	github.com/j0sh/minikafka v0.0.0-20261016010625-aeee8b249880
 	github.com/mattn/go-sqlite3 v1.14.52
