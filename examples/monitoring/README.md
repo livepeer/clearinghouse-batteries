@@ -59,24 +59,3 @@ monitoring from their owning infrastructure. Fatal errors can exit before a scra
 
 Validate with `promtool check rules alerts.rules.json` and
 `promtool test rules alerts.test.yml`.
-
-## Benchmark reference (before minimization)
-
-```
-go test ./internal/app -run '^$' -bench 'BenchmarkSteadyState/layout=shared/workers=1$/metrics=' -benchtime=250x -count=2 -benchmem
-```
-
-On 2026-10-27, Apple M4 Max, shared allocation, one worker: two 25,000-ticket
-samples per mode, 36.9–37.7 seconds each. Enabled runs checked 375–376 successful
-scrapes at 100 ms intervals, two populated database refreshes each, and
-24,966–24,974 valid delay observations by their last periodic scrapes.
-
-| Mode | ns / 100 tickets | Tickets/s | Bytes/batch | Allocs/batch |
-| --- | ---: | ---: | ---: | ---: |
-| Disabled range | 147,479,972–150,792,020 | 663.2–678.1 | 21,544,941–21,630,194 | 189,126–189,665 |
-| Enabled range | 150,218,139–150,561,028 | 664.2–665.7 | 24,364,255–24,467,808 | 212,506–213,167 |
-
-These measurements precede the in-flight gauge and collection simplifications.
-They cover limited history on a host doing other verification work, with overlapping
-timing ranges; they establish neither current overhead nor production thresholds.
-Repeat on deployment hardware with larger histories and other worker counts.
