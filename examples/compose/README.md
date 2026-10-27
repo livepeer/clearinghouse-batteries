@@ -133,32 +133,3 @@ removes that project's live databases **and its local replicas**. Delete a dispo
 recovery project only after inspecting its project name. Restore the original
 `REPLICA_ROOT` before resuming the source with `docker compose up -d`; subsequent
 replica writes mean “latest” no longer refers to the drill's checkpoint, so retain `restored/` independently.
-
-This sample covers deployment and recovery work in
-[naap-ops #74](https://github.com/livepeer/naap-ops/issues/74) and
-[#80](https://github.com/livepeer/naap-ops/issues/80), and supports the Node runbook
-and backup work in [#60](https://github.com/livepeer/naap-ops/issues/60) and
-[#35](https://github.com/livepeer/naap-ops/issues/35).
-
-## Verification
-
-Rehearsed on 2026-10-04 in a disposable Ubuntu 24.04 GCP VM (Docker 29.1.3,
-Compose 2.40.3), using Clearinghouse `6bdbdc0` and Node `37b15c0` plus this
-sample. The `e2e-scope` geth fixture supplied the isolated chain and wallet;
-Node used that chain's Controller and a fixed test exchange rate.
-
-Verified all three public HTTPS endpoints, HTTP credential rejection, grant/key
-creation and webhook authorization, SCRAM delivery, wrong-password retention,
-duplicate accounting without a second charge, and restoration of all four
-SQLite databases with exact table comparisons. A second drill restored a pending
-outbox event into fresh volumes, ran `migrate up`, restarted both services,
-reauthorized with the saved API key, and delivered the replay with unchanged
-balances and one Kafka checkpoint advance. Installation into a nonempty volume
-was rejected. The producer tests injected labeled fixture events into the signer
-outbox; they did not run a complete paid SDK job.
-
-The GCS overlay was syntax-checked; GCS transport was not exercised. The old geth
-fixture substitutes Clique coinbase in RPC headers, so continuous on-chain
-listener coverage was disabled after its ancestry checks rejected those headers.
-The saved chain checkpoint was nevertheless preserved by backup and recovery.
-This exercised the current schema's migration command, not a version upgrade.
