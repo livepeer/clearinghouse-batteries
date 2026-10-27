@@ -446,7 +446,9 @@ race-enabled tests, `go vet`, Staticcheck, a vulnerability scan, and a productio
 build. Tests use local fixtures without a live chain or production credentials.
 Run `./bin/clearinghouse --version` to inspect the version and source commit.
 
-To release, set `VERSION` to the next `MAJOR.MINOR.PATCH` number. Commit it, then run
-`./release.sh <remote>`.
+To release, set [VERSION](VERSION) to the next `MAJOR.MINOR.PATCH`, merge it to
+`main`, and run [Release](.github/workflows/release.yml) from GitHub Actions.
+Retry failures with **Re-run failed jobs** until artifacts expire after 7d, or
+rerun all jobs.
 
 See [SECURITY.md](SECURITY.md) for deployment security.
