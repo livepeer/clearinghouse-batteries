@@ -3,6 +3,7 @@ package chain
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"slices"
@@ -15,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/livepeer/clearinghouse/internal/metrics"
 	"github.com/livepeer/clearinghouse/internal/store"
 	"github.com/livepeer/clearinghouse/internal/testutil"
 	"github.com/stretchr/testify/require"
@@ -157,6 +159,7 @@ func newListener(t *testing.T, f *testutil.Fixture) (*Listener, *rpcFixture) {
 func TestRPCConfirmationDuplicateDelayedAttributionAndReorg(t *testing.T) {
 	f := testutil.New(t, "100")
 	l, api := newListener(t, f)
+	l.Metrics = metrics.New("test", "commit")
 	ctx := context.Background()
 	originalHeaders := append([]*types.Header{}, api.headers...)
 	log := makeLog(t, api.headers[3], 1)
@@ -168,6 +171,9 @@ func TestRPCConfirmationDuplicateDelayedAttributionAndReorg(t *testing.T) {
 	}
 	next, _, _, err := f.DB.Checkpoint(ctx, "chain", l.Config.Stream())
 	require.NoError(t, err)
+	require.Equal(t, 5., testutil.MetricValue(t, l.Metrics, "chain_checkpoint_next_block", nil))
+	require.Equal(t, 0., testutil.MetricValue(t, l.Metrics, "chain_lag_blocks", nil))
+	assertFinancialMetrics(t, l, 500, 500, "unmatched")
 	if next != 5 {
 		t.Fatal(next)
 	}
@@ -192,6 +198,7 @@ func TestRPCConfirmationDuplicateDelayedAttributionAndReorg(t *testing.T) {
 	if rows[0]["match_status"] != "matched" || rows[0]["payment_session_id"] != f.Session || rows[0]["authorization_id"] != nil {
 		t.Fatal(rows)
 	}
+	assertFinancialMetrics(t, l, 500, 500, "matched")
 	bal, err := store.Balance(ctx, f.DB.DB, "allocation_available", f.Allocation)
 	require.NoError(t, err)
 	if bal.String() != "90" {
@@ -202,11 +209,19 @@ func TestRPCConfirmationDuplicateDelayedAttributionAndReorg(t *testing.T) {
 	if bal.String() != "500" {
 		t.Fatal(bal)
 	}
+	last := testutil.MetricValue(t, l.Metrics, "chain_last_successful_poll_timestamp_seconds", nil)
+	require.Eventually(t, func() bool {
+		progress, err := l.Step(ctx)
+		return err == nil && !progress && testutil.MetricValue(t, l.Metrics, "chain_last_successful_poll_timestamp_seconds", nil) > last
+	}, time.Second, time.Millisecond)
 	// Fork block 3; retain a common ancestor at block 2, then ingest the replacement payout.
 	api.headers = append(api.headers[:3], makeHeaders(3, api.headers[2].Hash(), "fork", 6)...)
 	api.logs = makeRedemptionLogs(t, api.headers[3], 3)
 	_, err = l.Step(ctx)
 	require.NoError(t, err)
+	assertFinancialMetrics(t, l, 0, 0, "matched")
+	require.Equal(t, 3., testutil.MetricValue(t, l.Metrics, "chain_checkpoint_next_block", nil))
+	require.Equal(t, 2., testutil.MetricValue(t, l.Metrics, "chain_lag_blocks", nil))
 	_, err = l.Step(ctx)
 	require.NoError(t, err)
 	rows, err = f.DB.List(ctx, "settlement", store.ListOptions{})
@@ -233,6 +248,8 @@ func TestRPCConfirmationDuplicateDelayedAttributionAndReorg(t *testing.T) {
 	if bal.String() != "500" {
 		t.Fatal(bal)
 	}
+	assertFinancialMetrics(t, l, 500, 500, "matched")
+	require.Equal(t, 2., testutil.MetricValue(t, l.Metrics, "chain_reorgs_total", nil))
 	var generation int
 	require.NoError(t, f.DB.DB.QueryRow(`SELECT generation FROM settlements WHERE tx_hash=?`, strings.ToLower(log.TxHash.Hex())).Scan(&generation))
 	if generation != 1 {
@@ -367,6 +384,7 @@ func TestResolveChainConfiguration(t *testing.T) {
 func TestEscrowFundingPartialRedemptionWithdrawalAndReporting(t *testing.T) {
 	f := testutil.New(t, "100")
 	l, api := newListener(t, f)
+	l.Metrics = metrics.New("test", "commit")
 	originalHeaders := append([]*types.Header{}, api.headers...)
 	api.deposit, api.reserve = big.NewInt(100), big.NewInt(50)
 	api.logs = append(api.logs, makeFundingLog(t, api.headers[2], 20, 20, 10, "DepositFunded"))
@@ -378,6 +396,13 @@ func TestEscrowFundingPartialRedemptionWithdrawalAndReporting(t *testing.T) {
 	_, err := l.Step(ctx)
 	require.NoError(t, err)
 
+	assertFinancialMetrics(t, l, 200, 150, "unmatched")
+	require.Equal(t, 1., testutil.MetricValue(t, l.Metrics, "settlements_underpaid", nil))
+	require.Equal(t, 50e-18, testutil.MetricValue(t, l.Metrics, "settlement_shortfall_eth", nil))
+	for _, bucket := range []string{"deposit", "reserve"} {
+		require.Equal(t, 0., testutil.MetricValue(t, l.Metrics, "escrow_min_balance_eth", map[string]string{"bucket": bucket}))
+		require.Equal(t, 1., testutil.MetricValue(t, l.Metrics, "escrow_unfunded_signers", map[string]string{"bucket": bucket}))
+	}
 	report, err := f.DB.EscrowReport(ctx)
 	require.NoError(t, err)
 	if len(report) != 1 || report[0]["deposit_balance_wei"] != "0" || report[0]["reserve_balance_wei"] != "0" || report[0]["total_balance_wei"] != "0" || report[0]["confirmed_through_block"] != "4" {
@@ -421,6 +446,8 @@ func TestEscrowFundingPartialRedemptionWithdrawalAndReporting(t *testing.T) {
 	}
 	spend, err := store.Balance(ctx, f.DB.DB, "treasury_settled_spend", "42161:"+testutil.Sender)
 	require.NoError(t, err)
+	assertFinancialMetrics(t, l, 0, 0, "unmatched")
+	require.Equal(t, 0., testutil.MetricValue(t, l.Metrics, "settlements_underpaid", nil))
 	if spend.Sign() != 0 {
 		t.Fatal(spend)
 	}
@@ -438,6 +465,8 @@ func TestEscrowFundingPartialRedemptionWithdrawalAndReporting(t *testing.T) {
 	}
 	spend, err = store.Balance(ctx, f.DB.DB, "treasury_settled_spend", "42161:"+testutil.Sender)
 	require.NoError(t, err)
+	assertFinancialMetrics(t, l, 200, 150, "unmatched")
+	require.Equal(t, 1., testutil.MetricValue(t, l.Metrics, "settlements_underpaid", nil))
 	if spend.String() != "150" {
 		t.Fatal(spend)
 	}
@@ -531,6 +560,217 @@ func TestInvalidPaymentSequencesDoNotAdvance(t *testing.T) {
 			require.NoError(t, err)
 			if !found || next != 1 {
 				t.Fatal(next, found)
+			}
+		})
+	}
+}
+
+func assertFinancialMetrics(t *testing.T, l *Listener, face, paid int64, match string) {
+	t.Helper()
+	items, err := store.MetricSnapshot(t.Context(), l.DB.DB, false, true)
+	require.NoError(t, err)
+	l.Metrics.Snapshot("financial", items)
+	require.Equal(t, store.MetricAmount(fmt.Sprint(face)), testutil.MetricValue(t, l.Metrics, "settlement_face_value_eth", nil))
+	require.Equal(t, store.MetricAmount(fmt.Sprint(paid)), testutil.MetricValue(t, l.Metrics, "settlement_paid_eth", nil))
+	count := 0.
+	if face > 0 {
+		count = 1
+	}
+	require.Equal(t, count, testutil.MetricValue(t, l.Metrics, "settlements", map[string]string{"status": "settled", "match_status": match}))
+}
+
+type filterRPC struct {
+	RPC
+	filter func(context.Context, ethereum.FilterQuery) ([]types.Log, error)
+}
+
+func (r filterRPC) FilterLogs(ctx context.Context, q ethereum.FilterQuery) ([]types.Log, error) {
+	return r.filter(ctx, q)
+}
+
+func TestPositionPublishedOnlyAfterSuccessfulPoll(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprint(fail), func(t *testing.T) {
+			f := testutil.New(t, "100")
+			l, api := newListener(t, f)
+			l.Metrics = metrics.New("test", "commit")
+			_, err := l.Step(t.Context())
+			require.NoError(t, err)
+			require.Equal(t, 5., testutil.MetricValue(t, l.Metrics, "chain_checkpoint_next_block", nil))
+			api.headers = append(api.headers, makeHeaders(7, api.headers[6].Hash(), "main", 8)...)
+			entered, release := make(chan struct{}), make(chan struct{})
+			l.RPC = filterRPC{RPC: api, filter: func(ctx context.Context, q ethereum.FilterQuery) ([]types.Log, error) {
+				close(entered)
+				select {
+				case <-release:
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+				if fail {
+					return nil, errors.New("RPC failed during log fetch")
+				}
+				return api.FilterLogs(ctx, q)
+			}}
+			done := make(chan error, 1)
+			go func() { _, e := l.Step(t.Context()); done <- e }()
+			<-entered
+			require.Equal(t, 6., testutil.MetricValue(t, l.Metrics, "chain_head_block", nil))
+			require.Equal(t, 5., testutil.MetricValue(t, l.Metrics, "chain_checkpoint_next_block", nil))
+			require.Equal(t, 1., testutil.MetricValue(t, l.Metrics, "collector_success", map[string]string{"collector": "chain"}))
+			close(release)
+			err = <-done
+			if fail {
+				require.Error(t, err)
+				require.Equal(t, "rpc", failureStage(err))
+				require.False(t, testutil.HasMetric(t, l.Metrics, "chain_head_block"))
+				require.Equal(t, 0., testutil.MetricValue(t, l.Metrics, "collector_success", map[string]string{"collector": "chain"}))
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, 8., testutil.MetricValue(t, l.Metrics, "chain_head_block", nil))
+				require.Equal(t, 7., testutil.MetricValue(t, l.Metrics, "chain_checkpoint_next_block", nil))
+				require.Equal(t, 0., testutil.MetricValue(t, l.Metrics, "chain_lag_blocks", nil))
+			}
+		})
+	}
+}
+
+func TestChainFailureStageAtBoundary(t *testing.T) {
+	for _, stage := range []string{"rpc", "decode", "canonicality", "database", "reorg_depth", "snapshot_boundary"} {
+		t.Run(stage, func(t *testing.T) {
+			f := testutil.New(t, "100")
+			l, api := newListener(t, f)
+			l.Metrics = metrics.New("test", "commit")
+			switch stage {
+			case "rpc":
+				l.RPC = filterRPC{RPC: api, filter: func(context.Context, ethereum.FilterQuery) ([]types.Log, error) {
+					return nil, errors.New("unavailable log provider")
+				}}
+			case "decode":
+				log := makeLog(t, api.headers[3], 1)
+				log.Data = []byte{1}
+				api.logs = []types.Log{log}
+			case "canonicality":
+				l.RPC = filterRPC{RPC: api, filter: func(ctx context.Context, q ethereum.FilterQuery) ([]types.Log, error) {
+					logs, err := api.FilterLogs(ctx, q)
+					copyHeader := *api.headers[4]
+					copyHeader.Extra = []byte("changed during log fetch")
+					api.headers[4] = &copyHeader
+					return logs, err
+				}}
+			case "database":
+				_, err := f.DB.DB.Exec(`CREATE TRIGGER fail_apply BEFORE INSERT ON chain_blocks WHEN NEW.number>0 BEGIN SELECT RAISE(ABORT,'apply failed'); END`)
+				require.NoError(t, err)
+			case "reorg_depth":
+				_, err := l.Step(t.Context())
+				require.NoError(t, err)
+				api.headers = makeHeaders(0, common.Hash{}, "unrelated", 6)
+			case "snapshot_boundary":
+				start := int64(3)
+				l.Config.Start = &start
+				_, err := l.Step(t.Context())
+				require.NoError(t, err)
+				_, err = f.DB.DB.Exec(`INSERT INTO chain_blocks(stream,number,hash) VALUES(?,?,?)`, l.Config.Stream(), 1, strings.ToLower(api.headers[1].Hash().Hex()))
+				require.NoError(t, err)
+				api.headers = append(api.headers[:2], makeHeaders(2, api.headers[1].Hash(), "fork-before-anchor", 6)...)
+			}
+			_, err := l.Step(t.Context())
+			require.Error(t, err)
+			require.Equal(t, stage, failureStage(err))
+			require.Equal(t, 1., testutil.MetricValue(t, l.Metrics, "service_errors_total", map[string]string{"component": "chain", "operation": "poll", "reason": stage}))
+			require.False(t, testutil.HasMetric(t, l.Metrics, "chain_head_block"))
+		})
+	}
+}
+
+func TestZeroPaymentAndUnfundedSignerMetrics(t *testing.T) {
+	f := testutil.New(t, "100")
+	l, api := newListener(t, f)
+	l.Metrics = metrics.New("test", "commit")
+	api.deposit, api.reserve = new(big.Int), new(big.Int)
+	l.Config.Senders = append(l.Config.Senders, "0x4444444444444444444444444444444444444444")
+	api.logs = makePaymentLogs(t, api.headers[3], 1, 1, 10, 0, 0)
+	_, err := l.Step(t.Context())
+	require.NoError(t, err)
+	assertFinancialMetrics(t, l, 10, 0, "unmatched")
+	require.Equal(t, 1., testutil.MetricValue(t, l.Metrics, "settlements_underpaid", nil))
+	require.Equal(t, 10e-18, testutil.MetricValue(t, l.Metrics, "settlement_shortfall_eth", nil))
+	for _, bucket := range []string{"deposit", "reserve"} {
+		labels := map[string]string{"bucket": bucket}
+		require.Equal(t, 2., testutil.MetricValue(t, l.Metrics, "escrow_unfunded_signers", labels))
+		require.Equal(t, 0., testutil.MetricValue(t, l.Metrics, "escrow_min_balance_eth", labels))
+		require.Equal(t, 0., testutil.MetricValue(t, l.Metrics, "escrow_balance_eth", labels))
+	}
+}
+
+type headerRPC struct {
+	RPC
+	header func(context.Context, *big.Int) (*types.Header, error)
+}
+
+func (r headerRPC) HeaderByNumber(ctx context.Context, n *big.Int) (*types.Header, error) {
+	return r.header(ctx, n)
+}
+
+func TestMetricsPublicationDoesNotReadDatabaseAfterIdlePoll(t *testing.T) {
+	f := testutil.New(t, "100")
+	l, api := newListener(t, f)
+	l.Metrics = metrics.New("test", "commit")
+	_, err := l.Step(t.Context())
+	require.NoError(t, err)
+	// The idle poll needs no further SQL once its saved checkpoint has been read.
+	// Closing the pool at its final RPC makes any telemetry-only SQL read fail.
+	l.RPC = headerRPC{RPC: api, header: func(ctx context.Context, n *big.Int) (*types.Header, error) {
+		h, e := api.HeaderByNumber(ctx, n)
+		if n != nil && n.Int64() == 4 {
+			require.NoError(t, f.DB.DB.Close())
+		}
+		return h, e
+	}}
+	progress, pollErr := l.Step(t.Context())
+	reopened, err := store.Open(t.Context(), f.Path, false)
+	require.NoError(t, err)
+	f.DB.DB = reopened.DB
+	require.NoError(t, pollErr)
+	require.False(t, progress)
+	require.Equal(t, 5., testutil.MetricValue(t, l.Metrics, "chain_checkpoint_next_block", nil))
+	require.Equal(t, 1., testutil.MetricValue(t, l.Metrics, "collector_success", map[string]string{"collector": "chain"}))
+	require.False(t, testutil.HasMetric(t, l.Metrics, "service_errors_total"))
+}
+
+func TestPollTimeoutCountedButShutdownPreservesSnapshot(t *testing.T) {
+	for _, shutdown := range []bool{false, true} {
+		t.Run(fmt.Sprint(shutdown), func(t *testing.T) {
+			f := testutil.New(t, "100")
+			l, api := newListener(t, f)
+			l.Metrics = metrics.New("test", "commit")
+			_, err := l.Step(t.Context())
+			require.NoError(t, err)
+			last := testutil.MetricValue(t, l.Metrics, "chain_last_successful_poll_timestamp_seconds", nil)
+			api.headers = append(api.headers, makeHeaders(7, api.headers[6].Hash(), "main", 8)...)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
+			defer cancel()
+			l.RPC = filterRPC{RPC: api, filter: func(ctx context.Context, _ ethereum.FilterQuery) ([]types.Log, error) {
+				if shutdown {
+					cancel()
+				}
+				<-ctx.Done()
+				return nil, ctx.Err()
+			}}
+			_, err = l.Step(ctx)
+			require.Error(t, err)
+			require.Equal(t, last, testutil.MetricValue(t, l.Metrics, "chain_last_successful_poll_timestamp_seconds", nil))
+			if shutdown {
+				require.ErrorIs(t, err, context.Canceled)
+				require.False(t, testutil.HasMetric(t, l.Metrics, "collector_errors_total"))
+				require.False(t, testutil.HasMetric(t, l.Metrics, "service_errors_total"))
+				require.Equal(t, 1., testutil.MetricValue(t, l.Metrics, "collector_success", map[string]string{"collector": "chain"}))
+				require.Equal(t, 6., testutil.MetricValue(t, l.Metrics, "chain_head_block", nil))
+			} else {
+				require.ErrorIs(t, err, context.DeadlineExceeded)
+				require.Equal(t, 1., testutil.MetricValue(t, l.Metrics, "collector_errors_total", map[string]string{"collector": "chain"}))
+				require.Equal(t, 1., testutil.MetricValue(t, l.Metrics, "service_errors_total", map[string]string{"component": "chain", "operation": "poll", "reason": "rpc"}))
+				require.Equal(t, 0., testutil.MetricValue(t, l.Metrics, "collector_success", map[string]string{"collector": "chain"}))
+				require.False(t, testutil.HasMetric(t, l.Metrics, "chain_head_block"))
 			}
 		})
 	}

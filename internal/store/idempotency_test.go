@@ -3,6 +3,7 @@ package store_test
 import (
 	"crypto/sha256"
 	"fmt"
+	"github.com/livepeer/clearinghouse/internal/metrics"
 	"sync"
 	"testing"
 
@@ -151,4 +152,27 @@ func TestIdempotencyRejectsInvalidKey(t *testing.T) {
 	_, err := f.DB.FundCurrencyIdempotent(t.Context(), "grant", f.Grant, "10", "eth", store.Idempotency{Key: "invalid+key"})
 	require.ErrorIs(t, err, store.ErrInvalidManagementInput)
 	require.Equal(t, before, f.ManagementState(t))
+}
+
+func TestIdempotencyMetricsRequireKey(t *testing.T) {
+	f := testutil.New(t, "100")
+	m := metrics.New("test", "commit")
+	f.DB.Metrics = m
+	fund := func(request store.Idempotency) error {
+		_, err := f.DB.FundCurrencyIdempotent(t.Context(), "grant", f.Grant, "10", "eth", request)
+		return err
+	}
+	require.NoError(t, fund(store.Idempotency{}))
+	require.False(t, testutil.HasMetric(t, m, "management_idempotency_total"))
+	require.Error(t, fund(store.Idempotency{Key: "invalid+key"}))
+	require.False(t, testutil.HasMetric(t, m, "management_idempotency_total"))
+	request := store.Idempotency{Key: "metrics", Fingerprint: sha256.Sum256([]byte("10"))}
+	require.NoError(t, fund(request))
+	require.NoError(t, fund(request))
+	request.Fingerprint = sha256.Sum256([]byte("different"))
+	require.ErrorIs(t, fund(request), store.ErrManagementConflict)
+	require.NoError(t, fund(store.Idempotency{}))
+	for _, outcome := range []string{"executed", "replayed", "conflict"} {
+		require.Equal(t, 1., testutil.MetricValue(t, m, "management_idempotency_total", map[string]string{"outcome": outcome}))
+	}
 }

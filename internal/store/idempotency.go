@@ -44,6 +44,7 @@ func (s *Store) writeIdempotent(ctx context.Context, scopeKind, scopeID string, 
 			return ManagementResponse{}, err
 		}
 	}
+	outcome := "executed"
 	var response ManagementResponse
 	err := s.Write(ctx, func(tx *sql.Tx) error {
 		grant := scopeID
@@ -57,8 +58,10 @@ func (s *Store) writeIdempotent(ctx context.Context, scopeKind, scopeID string, 
 			err := tx.QueryRowContext(ctx, `SELECT fingerprint,response_status,response_json FROM management_idempotency WHERE grant_id=? AND idempotency_key=?`, grant, request.Key).Scan(&fingerprint, &response.Status, &response.Body)
 			if err == nil {
 				if !bytes.Equal(fingerprint, request.Fingerprint[:]) {
+					s.Metrics.Add("management_idempotency_total", 1, []string{"outcome"}, "conflict")
 					return stateConflict("idempotency key was already used with different parameters or operation")
 				}
+				outcome = "replayed"
 				return nil
 			}
 			if !errors.Is(err, sql.ErrNoRows) {
@@ -82,6 +85,9 @@ func (s *Store) writeIdempotent(ctx context.Context, scopeKind, scopeID string, 
 	})
 	if err != nil {
 		return ManagementResponse{}, err
+	}
+	if request.Key != "" {
+		s.Metrics.Add("management_idempotency_total", 1, []string{"outcome"}, outcome)
 	}
 	return response, nil
 }

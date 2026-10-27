@@ -41,3 +41,6 @@ Confirmations = 64
 PollInterval = "5s"
 BlockBatchSize = 2000
 ReorgLookback = 256
+
+# Private Prometheus listener, disabled when omitted.
+# EnableMetrics = ":9094"

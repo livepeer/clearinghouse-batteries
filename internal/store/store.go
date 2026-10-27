@@ -14,11 +14,15 @@ import (
 	"time"
 	"uuid"
 
+	"github.com/livepeer/clearinghouse/internal/metrics"
 	"github.com/livepeer/clearinghouse/migrations"
-	_ "github.com/mattn/go-sqlite3"
+	"github.com/mattn/go-sqlite3"
 )
 
-type Store struct{ DB *sql.DB }
+type Store struct {
+	DB      *sql.DB
+	Metrics *metrics.Metrics
+}
 
 func Open(ctx context.Context, path string, migrate bool) (*Store, error) {
 	if path == "" {
@@ -64,11 +68,36 @@ func Open(ctx context.Context, path string, migrate bool) (*Store, error) {
 			return nil, err
 		}
 	}
-	return &Store{db}, nil
+	return &Store{DB: db}, nil
 }
 
 func (s *Store) Close() error { return s.DB.Close() }
-func (s *Store) Write(ctx context.Context, fn func(*sql.Tx) error) error {
+func (s *Store) Write(ctx context.Context, fn func(*sql.Tx) error) (result error) {
+	start := time.Now()
+	defer func() {
+		outcome := "committed"
+		if result != nil {
+			outcome = "rejected"
+			var sqliteErr sqlite3.Error
+			if errors.As(result, &sqliteErr) {
+				outcome = "database_error"
+				reason := "other"
+				switch sqliteErr.Code {
+				case sqlite3.ErrBusy, sqlite3.ErrLocked:
+					reason = "busy"
+				case sqlite3.ErrFull:
+					reason = "full"
+				case sqlite3.ErrIoErr:
+					reason = "io"
+				case sqlite3.ErrCorrupt, sqlite3.ErrNotADB:
+					reason = "corrupt"
+				}
+				s.Metrics.Error("database", "transaction", reason)
+			}
+		}
+		s.Metrics.Add("db_transactions_total", 1, []string{"outcome"}, outcome)
+		s.Metrics.Observe("db_transaction_duration_seconds", time.Since(start).Seconds(), []string{"outcome"}, outcome)
+	}()
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err

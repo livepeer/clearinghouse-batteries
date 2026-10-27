@@ -20,8 +20,10 @@ import (
 	"github.com/livepeer/clearinghouse/internal/auth"
 	"github.com/livepeer/clearinghouse/internal/chain"
 	"github.com/livepeer/clearinghouse/internal/kafka"
+	"github.com/livepeer/clearinghouse/internal/metrics"
 	"github.com/livepeer/clearinghouse/internal/serviceauth"
 	"github.com/livepeer/clearinghouse/internal/store"
+	"github.com/livepeer/clearinghouse/internal/version"
 )
 
 type Common struct {
@@ -55,6 +57,7 @@ func (b *HTTPBind) UnmarshalText(text []byte) error {
 
 type ServeParams struct {
 	Common
+	EnableMetrics         HTTPBind      `optional:"true" descr:"Private Prometheus metrics listener; :port binds to loopback"`
 	EnableAuthWebhook     HTTPBind      `optional:"true" descr:"Run signer authorization HTTP server on IP:port; :port binds to 127.0.0.1"`
 	EnableManagementAPI   HTTPBind      `optional:"true" descr:"Run management HTTP server on IP:port; :port binds to 127.0.0.1"`
 	UnsafeHTTPBind        bool          `name:"unsafe-http-bind" optional:"true" descr:"Allow HTTP servers to bind to a non-loopback IP"`
@@ -83,6 +86,16 @@ func (p ServeParams) chainConfig() chain.Config {
 }
 
 func (p ServeParams) Validate() error {
+	if p.EnableMetrics.IsValid() {
+		if !p.EnableMetrics.Addr().IsLoopback() && !p.UnsafeHTTPBind {
+			return errors.New("metrics bind must be loopback; use --unsafe-http-bind to override")
+		}
+		for _, b := range []HTTPBind{p.EnableAuthWebhook, p.EnableManagementAPI} {
+			if b.IsValid() && b.Port() == p.EnableMetrics.Port() {
+				return errors.New("metrics requires a separate TCP port")
+			}
+		}
+	}
 	webhookEnabled := p.EnableAuthWebhook.IsValid()
 	managementEnabled := p.EnableManagementAPI.IsValid()
 	if !webhookEnabled && !managementEnabled && !p.EnableKafka && !p.EnableAccounting && !p.EnableOnchainListener {
@@ -235,11 +248,33 @@ func Serve(ctx context.Context, p ServeParams) error {
 			}
 		}
 	}
-	k := &kafka.Listener{DB: db, Broker: brokerAddr, Topic: p.KafkaTopic, Dialer: kafkaDialer}
-	c := &chain.Listener{DB: db, Config: p.chainConfig()}
-	done := make(chan error, 5)
+	var telemetry *metrics.Metrics
+	if p.EnableMetrics.IsValid() {
+		telemetry = metrics.New(version.Version, version.Commit)
+		if db != nil {
+			db.Metrics = telemetry
+		}
+	}
+	k := &kafka.Listener{DB: db, Broker: brokerAddr, Topic: p.KafkaTopic, Dialer: kafkaDialer, Metrics: telemetry}
+	c := &chain.Listener{DB: db, Config: p.chainConfig(), Metrics: telemetry}
+	done := make(chan error, 6)
 	count := 0
 	start := func(fn func(context.Context) error) { count++; go func() { done <- fn(ctx) }() }
+	if telemetry != nil {
+		ln, err := net.Listen("tcp", p.EnableMetrics.String())
+		if err != nil {
+			return err
+		}
+		defer ln.Close()
+		monitorCtx, stopMonitor := context.WithCancel(ctx)
+		defer stopMonitor()
+		monitorDone := make(chan struct{})
+		go func() { defer close(monitorDone); monitorMetrics(monitorCtx, p, db, k, c, telemetry) }()
+		defer func() { stopMonitor(); <-monitorDone }()
+		mux := http.NewServeMux()
+		mux.Handle("GET /metrics", telemetry.Handler())
+		start(func(ctx context.Context) error { return serveHTTP(ctx, ln, mux) })
+	}
 	var webhookListener, managementListener net.Listener
 	if webhookBind != "" {
 		ln, err := net.Listen("tcp", webhookBind)
@@ -259,13 +294,13 @@ func Serve(ctx context.Context, p ServeParams) error {
 	}
 	if webhookListener != nil {
 		start(func(ctx context.Context) error {
-			return serveHTTP(ctx, webhookListener, authWebhookHandler(ctx, db, registry))
+			return serveHTTP(ctx, webhookListener, telemetry.HTTP("webhook", authWebhookHandler(ctx, db, registry)))
 		})
 		slog.Info("auth webhook listening", "bind", webhookListener.Addr().String())
 	}
 	if managementListener != nil {
 		start(func(ctx context.Context) error {
-			return serveHTTP(ctx, managementListener, managementHandler(ctx, db, registry))
+			return serveHTTP(ctx, managementListener, telemetry.HTTP("management", managementHandler(ctx, db, registry)))
 		})
 		slog.Info("management API listening", "bind", managementListener.Addr().String())
 	}

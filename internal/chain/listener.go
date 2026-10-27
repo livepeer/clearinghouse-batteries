@@ -22,7 +22,9 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/livepeer/clearinghouse/internal/metrics"
 	"github.com/livepeer/clearinghouse/internal/store"
+	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -83,12 +85,40 @@ type Config struct {
 	Poll                               time.Duration
 }
 type Listener struct {
-	DB     *store.Store
-	RPC    RPC
-	Config Config
-	Ready  atomic.Bool
+	Metrics *metrics.Metrics
+	DB      *store.Store
+	RPC     RPC
+	Config  Config
+	Ready   atomic.Bool
 }
 type fatalError struct{ error }
+
+func (e fatalError) Unwrap() error { return e.error }
+
+type stageError struct {
+	stage string
+	err   error
+}
+
+func (e stageError) Error() string { return e.err.Error() }
+func (e stageError) Unwrap() error { return e.err }
+func failureStage(err error) string {
+	var staged stageError
+	if errors.As(err, &staged) {
+		return staged.stage
+	}
+	return "poll"
+}
+func atStage(stage string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var staged stageError
+	if errors.As(err, &staged) {
+		return err
+	}
+	return stageError{stage, err}
+}
 
 func (c Config) Validate() error {
 	if c.ChainID != "" {
@@ -144,6 +174,9 @@ func (l *Listener) Run(ctx context.Context) error {
 		defer client.Close()
 		l.RPC = client
 	}
+	if l.Metrics != nil {
+		l.RPC = &measuredRPC{RPC: l.RPC, m: l.Metrics}
+	}
 	checkCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	err := l.resolveConfig(checkCtx)
 	cancel()
@@ -162,7 +195,10 @@ func (l *Listener) Run(ctx context.Context) error {
 	}
 	for {
 		stepCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		started := time.Now()
 		progress, err := l.Step(stepCtx)
+		l.Metrics.Observe("chain_poll_duration_seconds", time.Since(started).Seconds(), nil)
+
 		cancel()
 		wasReady := l.Ready.Swap(err == nil)
 		if err == nil && !wasReady {
@@ -246,10 +282,10 @@ func (l *Listener) resolveTicketBroker(ctx context.Context, controller common.Ad
 func (l *Listener) header(ctx context.Context, n int64) (*types.Header, error) {
 	h, err := l.RPC.HeaderByNumber(ctx, big.NewInt(n))
 	if err != nil {
-		return nil, err
+		return nil, atStage("rpc", err)
 	}
 	if h == nil || h.Number == nil || !h.Number.IsInt64() || h.Number.Int64() != n {
-		return nil, errors.New("RPC returned wrong block header")
+		return nil, atStage("canonicality", errors.New("RPC returned wrong block header"))
 	}
 	return h, nil
 }
@@ -280,7 +316,7 @@ func (l *Listener) openingSnapshots(ctx context.Context, next int64) (store.Bloc
 			}
 			result, err := l.RPC.CallContract(ctx, ethereum.CallMsg{To: &contract, Data: data}, big.NewInt(anchor.Number))
 			if err != nil {
-				return store.Block{}, nil, fmt.Errorf("historical getSenderInfo at block %d: %w", anchor.Number, err)
+				return store.Block{}, nil, atStage("rpc", fmt.Errorf("historical getSenderInfo at block %d: %w", anchor.Number, err))
 			}
 			// eth_call to an address before contract deployment returns empty data.
 			if len(result) != 0 {
@@ -315,16 +351,39 @@ func (l *Listener) openingSnapshots(ctx context.Context, next int64) (store.Bloc
 			return store.Block{}, nil, err
 		}
 		if strings.ToLower(header.Hash().Hex()) != anchor.Hash {
-			return store.Block{}, nil, errors.New("chain changed during opening snapshot")
+			return store.Block{}, nil, atStage("canonicality", errors.New("chain changed during opening snapshot"))
 		}
 	}
 	return anchor, snapshots, nil
 }
 
-func (l *Listener) Step(ctx context.Context) (bool, error) {
+func (l *Listener) Step(ctx context.Context) (progress bool, result error) {
+	started := time.Now()
+	stage := "database"
+	var next int64 // Last known committed position, updated only after successful writes.
+	var head *types.Header
+	defer func() {
+		result = atStage(stage, result)
+		if l.Metrics == nil {
+			return
+		}
+		var position []prometheus.Metric
+		if result == nil {
+			position = []prometheus.Metric{metrics.Gauge("chain_head_block", float64(head.Number.Int64()), nil), metrics.Gauge("chain_head_timestamp_seconds", float64(head.Time), nil), metrics.Gauge("chain_confirmations", float64(l.Config.Confirmations), nil), metrics.Gauge("chain_checkpoint_next_block", float64(next), nil), metrics.Gauge("chain_lag_blocks", float64(max(0, head.Number.Int64()-l.Config.Confirmations-(next-1))), nil)}
+		}
+		l.Metrics.Publish(ctx, "chain", started, position, result)
+		if result != nil && !errors.Is(ctx.Err(), context.Canceled) {
+			l.Metrics.Error("chain", "poll", failureStage(result))
+		}
+	}()
+
 	c := l.Config
 	stream := c.Stream()
 	next, hash, found, err := l.DB.Checkpoint(ctx, "chain", stream)
+	if err != nil {
+		return false, err
+	}
+	head, err = l.latestHeader(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -332,16 +391,14 @@ func (l *Listener) Step(ctx context.Context) (bool, error) {
 		if c.Start != nil {
 			next = *c.Start
 		} else {
-			head, err := l.latestHeader(ctx)
-			if err != nil {
-				return false, err
-			}
 			next = head.Number.Int64()
 		}
+		stage = "decode"
 		anchor, snapshots, err := l.openingSnapshots(ctx, next)
 		if err != nil {
 			return false, err
 		}
+		stage = "database"
 		if err := l.DB.BootstrapChain(ctx, stream, anchor, snapshots); err != nil {
 			return false, err
 		}
@@ -354,6 +411,7 @@ func (l *Listener) Step(ctx context.Context) (bool, error) {
 			return false, err
 		}
 		if strings.ToLower(h.Hash().Hex()) != hash {
+			stage = "database"
 			blocks, err := l.DB.Blocks(ctx, stream)
 			if err != nil {
 				return false, err
@@ -367,21 +425,24 @@ func (l *Listener) Step(ctx context.Context) (bool, error) {
 					return false, err
 				}
 				if strings.ToLower(canonical.Hash().Hex()) == b.Hash {
+					stage = "database"
 					err = l.DB.Rewind(ctx, stream, c.ChainID, strings.ToLower(c.Contract), b)
+					if err == nil {
+						l.Metrics.Add("chain_reorgs_total", 1, nil)
+						l.Metrics.Observe("chain_reorg_depth_blocks", float64(next-1-b.Number), nil)
+						next = b.Number + 1
+					}
 					if errors.Is(err, store.ErrEscrowSnapshotReorg) {
-						return false, fatalError{err}
+						return false, fatalError{atStage("snapshot_boundary", err)}
 					}
 					return true, err
 				}
 			}
-			return false, fatalError{errors.New("reorg exceeds retained common-ancestor history")}
+			return false, fatalError{atStage("reorg_depth", errors.New("reorg exceeds retained common-ancestor history"))}
 		}
 	}
-	head, err := l.latestHeader(ctx)
-	if err != nil {
-		return false, err
-	}
 	confirmed := head.Number.Int64() - c.Confirmations
+
 	if confirmed < next {
 		return false, nil
 	}
@@ -410,7 +471,7 @@ func (l *Listener) Step(ctx context.Context) (bool, error) {
 	for n := next; n <= end; n++ {
 		h := fetched[n-next]
 		if prevHash != "" && strings.ToLower(h.ParentHash.Hex()) != prevHash {
-			return false, errors.New("chain changed during header fetch")
+			return false, atStage("canonicality", errors.New("chain changed during header fetch"))
 		}
 		prevHash = strings.ToLower(h.Hash().Hex())
 		blocks = append(blocks, store.Block{Number: n, Hash: prevHash})
@@ -426,10 +487,12 @@ func (l *Listener) Step(ctx context.Context) (bool, error) {
 		allowed[a] = true
 		senderTopics = append(senderTopics, common.BytesToHash(a.Bytes()))
 	}
+	stage = "rpc"
 	logs, err := l.RPC.FilterLogs(ctx, ethereum.FilterQuery{FromBlock: big.NewInt(next), ToBlock: big.NewInt(end), Addresses: []common.Address{common.HexToAddress(c.Contract)}, Topics: [][]common.Hash{EventIDs, senderTopics}})
 	if err != nil {
 		return false, err
 	}
+	stage = "decode"
 	logs, err = orderedUniqueLogs(logs)
 	if err != nil {
 		return false, err
@@ -445,7 +508,7 @@ func (l *Listener) Step(ctx context.Context) (bool, error) {
 		}
 		h := headers[int64(log.BlockNumber)]
 		if h == nil || h.Hash() != log.BlockHash || log.Address != common.HexToAddress(c.Contract) || len(log.Topics) < 2 || !knownTopics[log.Topics[0]] || !allowed[common.BytesToAddress(log.Topics[1].Bytes())] {
-			return false, errors.New("RPC log does not match requested domain or canonical block")
+			return false, atStage("canonicality", errors.New("RPC log does not match requested domain or canonical block"))
 		}
 		if h.Time > math.MaxInt64/1000 {
 			return false, errors.New("block timestamp overflows milliseconds")
@@ -465,18 +528,26 @@ func (l *Listener) Step(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	if last.Hash() != headers[end].Hash() {
-		return false, errors.New("chain changed during log fetch")
+		return false, atStage("canonicality", errors.New("chain changed during log fetch"))
 	}
-	return true, l.DB.ApplyChain(ctx, stream, blocks, events, c.Lookback)
+	stage = "database"
+	err = l.DB.ApplyChain(ctx, stream, blocks, events, c.Lookback)
+	if err == nil {
+		next = end + 1
+		l.Metrics.Add("chain_blocks_total", float64(len(blocks)), nil)
+		l.Metrics.Add("chain_events_total", float64(len(events)), nil)
+		l.Metrics.Snapshot("chain_progress", []prometheus.Metric{metrics.Gauge("chain_last_progress_timestamp_seconds", float64(time.Now().UnixMilli())/1000, nil)})
+	}
+	return true, err
 }
 
 func (l *Listener) latestHeader(ctx context.Context) (*types.Header, error) {
 	head, err := l.RPC.HeaderByNumber(ctx, nil)
 	if err != nil {
-		return nil, err
+		return nil, atStage("rpc", err)
 	}
 	if head == nil || head.Number == nil || !head.Number.IsInt64() || head.Number.Sign() < 0 || head.Number.Int64() == math.MaxInt64 {
-		return nil, errors.New("invalid head")
+		return nil, atStage("canonicality", errors.New("invalid head"))
 	}
 	return head, nil
 }
@@ -674,4 +745,38 @@ func correlateRedemptions(events []store.EscrowEvent) ([]store.EscrowEvent, erro
 		return nil, errors.New("incomplete redemption event sequence")
 	}
 	return events, nil
+}
+
+type measuredRPC struct {
+	RPC
+	m *metrics.Metrics
+}
+
+func (r *measuredRPC) done(op string, start time.Time, err error) {
+	outcome := "success"
+	if err != nil {
+		outcome = "error"
+	}
+	r.m.Add("chain_rpc_requests_total", 1, []string{"operation", "outcome"}, op, outcome)
+	r.m.Observe("chain_rpc_request_duration_seconds", time.Since(start).Seconds(), []string{"operation"}, op)
+}
+func (r *measuredRPC) ChainID(ctx context.Context) (v *big.Int, e error) {
+	start := time.Now()
+	defer func() { r.done("chain_id", start, e) }()
+	return r.RPC.ChainID(ctx)
+}
+func (r *measuredRPC) HeaderByNumber(ctx context.Context, n *big.Int) (v *types.Header, e error) {
+	start := time.Now()
+	defer func() { r.done("header", start, e) }()
+	return r.RPC.HeaderByNumber(ctx, n)
+}
+func (r *measuredRPC) FilterLogs(ctx context.Context, q ethereum.FilterQuery) (v []types.Log, e error) {
+	start := time.Now()
+	defer func() { r.done("logs", start, e) }()
+	return r.RPC.FilterLogs(ctx, q)
+}
+func (r *measuredRPC) CallContract(ctx context.Context, msg ethereum.CallMsg, n *big.Int) (v []byte, e error) {
+	start := time.Now()
+	defer func() { r.done("call_contract", start, e) }()
+	return r.RPC.CallContract(ctx, msg, n)
 }

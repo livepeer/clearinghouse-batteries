@@ -10,23 +10,27 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/j0sh/minikafka"
 	"github.com/j0sh/minikafka/storage/sqlite"
+	"github.com/livepeer/clearinghouse/internal/metrics"
 	"github.com/livepeer/clearinghouse/internal/serviceauth"
 	"github.com/livepeer/clearinghouse/internal/store"
+	"github.com/prometheus/client_golang/prometheus"
 	kgo "github.com/segmentio/kafka-go"
 	"golang.org/x/sync/errgroup"
 )
 
 type Listener struct {
-	DB     *store.Store
-	Broker string
-	Topic  string
-	Dialer *kgo.Dialer
-	Ready  atomic.Bool
+	Metrics *metrics.Metrics
+	DB      *store.Store
+	Broker  string
+	Topic   string
+	Dialer  *kgo.Dialer
+	Ready   atomic.Bool
 }
 
 // OpenBroker initializes persistent storage and binds the listener before returning.
@@ -62,7 +66,19 @@ func OpenBroker(ctx context.Context, bind, advertisedAddr, topic, dir string, cr
 	return broker, nil
 }
 
-func (l *Listener) Run(ctx context.Context) error {
+func (l *Listener) Run(ctx context.Context) (result error) {
+	defer func() {
+		if result != nil && ctx.Err() == nil {
+			reason := "consumer"
+			if strings.Contains(result.Error(), "offset gap") {
+				reason = "offset_gap"
+			}
+			if strings.Contains(result.Error(), "outside retained offsets") {
+				reason = "retained_offsets"
+			}
+			l.Metrics.Error("accounting", "run", reason)
+		}
+	}()
 	defer l.Ready.Store(false)
 	if l.Broker == "" {
 		return errors.New("kafka broker address required")
@@ -79,6 +95,15 @@ func (l *Listener) Run(ctx context.Context) error {
 		next   int64
 	}
 	var readers []partitionReader
+	// Initialize bounded outcome series before processing so the first event is visible to rate queries.
+	for _, partition := range partitions {
+		for _, outcome := range []string{"applied", "ignored", "duplicate"} {
+			l.Metrics.Add("usage_events_total", 0, []string{"topic", "partition", "outcome", "reason"}, l.Topic, fmt.Sprint(partition), outcome, "none")
+		}
+		for _, reason := range []string{"envelope", "conflicting_id", "ticket_data", "unknown_session", "session_binding", "invalid_ticket", "missing_usd_fee", "other"} {
+			l.Metrics.Add("usage_events_total", 0, []string{"topic", "partition", "outcome", "reason"}, l.Topic, fmt.Sprint(partition), "quarantined", reason)
+		}
+	}
 	// Validate every checkpoint before allowing any reader to ingest.
 	for _, partition := range partitions {
 		reader, next, err := l.openReader(ctx, partition)
@@ -197,4 +222,35 @@ func (l *Listener) offsets(ctx context.Context, partition int) (int64, int64, er
 		return 0, 0, fmt.Errorf("%s: %w", l.Broker, err)
 	}
 	return first, last, nil
+}
+
+// MetricSnapshot probes durable checkpoints, never reader prefetch positions.
+func (l *Listener) MetricSnapshot(ctx context.Context, checkpoints *store.Store) (out []prometheus.Metric, err error) {
+	parts, err := l.partitions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range parts {
+		var first, last, next int64
+		for attempt := 0; attempt < 2; attempt++ {
+			next, _, _, err = checkpoints.Checkpoint(ctx, "kafka", store.KafkaStream(l.Topic, p))
+			if err != nil {
+				return nil, err
+			}
+			first, last, err = l.offsets(ctx, p)
+			if err != nil {
+				return nil, err
+			}
+			if next >= first && next <= last {
+				break
+			}
+			if attempt == 1 {
+				return nil, errors.New("checkpoint outside retained offsets")
+			}
+		}
+		for name, n := range map[string]int64{"kafka_checkpoint_next_offset": next, "kafka_log_start_offset": first, "kafka_log_end_offset": last, "accounting_lag_records": max(0, last-next)} {
+			out = append(out, metrics.Gauge(name, float64(n), []string{"topic", "partition"}, l.Topic, fmt.Sprint(p)))
+		}
+	}
+	return out, nil
 }

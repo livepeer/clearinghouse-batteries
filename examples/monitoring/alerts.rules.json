@@ -1,0 +1,69 @@
+{
+  "groups": [
+    {
+      "name": "clearinghouse",
+      "rules": [
+        {
+          "alert": "ClearinghouseDown",
+          "expr": "up{job=\"clearinghouse\"} == 0",
+          "labels": {
+            "severity": "critical"
+          },
+          "annotations": {
+            "summary": "Target unavailable; check the process and scrape endpoint."
+          }
+        },
+        {
+          "alert": "ClearinghouseCollectorFailed",
+          "expr": "livepeer_clearinghouse_collector_success == 0",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Collection failed; inspect collector errors and freshness."
+          }
+        },
+        {
+          "alert": "ClearinghouseOverdrawn",
+          "expr": "livepeer_clearinghouse_allocations_overdrawn > 0",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Allocations overdrawn; inspect ledger reports and delayed usage."
+          }
+        },
+        {
+          "alert": "ClearinghouseQuarantine",
+          "expr": "sum by (clearinghouse) (increase(livepeer_clearinghouse_usage_events_total{outcome=\"quarantined\"}[5m])) > 0",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "New quarantines; inspect usage records and validation failures."
+          }
+        },
+        {
+          "alert": "ClearinghouseAmbiguousSettlement",
+          "expr": "livepeer_clearinghouse_settlements{status=\"settled\",match_status=\"ambiguous\"} > 0",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Ambiguous settlements remain; investigate session attribution."
+          }
+        },
+        {
+          "alert": "ClearinghouseUnderpaidSettlement",
+          "expr": "livepeer_clearinghouse_settlements_underpaid > 0",
+          "labels": {
+            "severity": "critical"
+          },
+          "annotations": {
+            "summary": "Underpaid settlements remain; inspect payment shortfalls and escrow."
+          }
+        }
+      ]
+    }
+  ]
+}

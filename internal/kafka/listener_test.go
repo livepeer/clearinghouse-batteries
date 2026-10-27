@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"github.com/livepeer/clearinghouse/internal/metrics"
+	"net"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -382,4 +384,56 @@ func TestConsumerRejectsLostOffsets(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMetricSnapshotDurablePartitionsAndRetry(t *testing.T) {
+	f := testutil.New(t, "100")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	backend := memory.Open()
+	require.NoError(t, backend.Init(ctx))
+	require.NoError(t, backend.CreateTopic(ctx, "events", minikafka.TopicOptions{Partitions: 2}))
+	for p, count := range []int{2, 3} {
+		records := make([]minikafka.Record, count)
+		for i := range records {
+			records[i].Value = []byte("pending")
+		}
+		_, err := backend.Append(ctx, minikafka.AppendRequest{Topic: "events", Partition: int32(p), Records: records})
+		require.NoError(t, err)
+	}
+	broker, err := minikafka.Open(minikafka.Config{Addr: testutil.Port(t), Store: backend})
+	require.NoError(t, err)
+	done := make(chan error, 1)
+	go func() { done <- broker.Serve(ctx) }()
+	defer func() { cancel(); broker.Close(); require.NoError(t, <-done) }()
+	set := func(next int64) {
+		require.NoError(t, f.DB.Write(ctx, func(tx *sql.Tx) error {
+			return store.SetCheckpoint(ctx, tx, "kafka", store.KafkaStream("events", 0), next, "")
+		}))
+	}
+	set(100)
+	calls := 0
+	dialer := &kgo.Dialer{DialFunc: func(ctx context.Context, network, address string) (net.Conn, error) {
+		calls++
+		if calls == 2 {
+			set(1)
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	}}
+	l := &Listener{DB: f.DB, Broker: broker.Addr(), Topic: "events", Dialer: dialer}
+	items, err := l.MetricSnapshot(ctx, l.DB)
+	require.NoError(t, err)
+	m := metrics.New("test", "commit")
+	m.Snapshot("kafka", items)
+	for partition, want := range []float64{1, 3} {
+		labels := map[string]string{"topic": "events", "partition": fmt.Sprint(partition)}
+		require.Equal(t, want, testutil.MetricValue(t, m, "accounting_lag_records", labels))
+		require.Equal(t, float64([]int{1, 0}[partition]), testutil.MetricValue(t, m, "kafka_checkpoint_next_offset", labels))
+	}
+	require.GreaterOrEqual(t, calls, 3)
+	set(100)
+	l.Dialer = nil
+	items, err = l.MetricSnapshot(ctx, l.DB)
+	require.ErrorContains(t, err, "checkpoint outside retained offsets")
+	require.Nil(t, items)
 }

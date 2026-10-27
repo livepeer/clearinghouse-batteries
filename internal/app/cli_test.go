@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -313,11 +314,18 @@ func TestAllComponentCombinations(t *testing.T) {
 	require.NoError(t, r.RegisterName("eth", startupRPC{}))
 	srv := httptest.NewServer(r)
 	defer srv.Close()
-	for mask := 1; mask < 16; mask++ {
+	for mask := 1; mask < 32; mask++ {
+		if mask&15 == 0 {
+			continue
+		}
+		enabled := mask&16 != 0
 		t.Run(fmt.Sprint(mask), func(t *testing.T) {
 			dir := t.TempDir()
 			start := int64(0)
 			p := ServeParams{Common: Common{DBPath: filepath.Join(dir, "accounts.db")}, EnableKafka: mask&2 != 0, EnableOnchainListener: mask&4 != 0, CredsFile: testCredsFile(t), KafkaBind: testutil.Port(t), KafkaTopic: "events", RPCURL: srv.URL, ChainID: "42161", TicketBroker: testutil.Contract, SignerAddresses: []string{testutil.Sender}, StartBlock: &start, Confirmations: 0, BlockBatchSize: 10, ReorgLookback: 4, PollInterval: 10 * time.Millisecond}
+			if enabled {
+				p.EnableMetrics = mustHTTPBind(t, testutil.Port(t))
+			}
 			if mask&1 != 0 {
 				p.EnableAuthWebhook = mustHTTPBind(t, testutil.Port(t))
 			}
@@ -351,6 +359,19 @@ func TestAllComponentCombinations(t *testing.T) {
 				}
 			})
 			testutil.Eventually(t, func() bool {
+				if enabled {
+					client := http.Client{Timeout: time.Second}
+					res, err := client.Get("http://" + p.EnableMetrics.String() + "/metrics")
+					if err != nil {
+						return false
+					}
+					body, err := io.ReadAll(res.Body)
+					res.Body.Close()
+					if err != nil || res.StatusCode != 200 || !strings.Contains(string(body), "livepeer_clearinghouse_build_info") {
+						return false
+					}
+				}
+
 				if p.EnableAuthWebhook.IsValid() {
 					client := http.Client{Timeout: time.Second}
 					res, err := client.Get("http://" + p.EnableAuthWebhook.String() + "/readyz")

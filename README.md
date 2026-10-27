@@ -325,3 +325,9 @@ Retry failures with **Re-run failed jobs** until artifacts expire after 7d, or
 rerun all jobs.
 
 See [SECURITY.md](SECURITY.md) for deployment security.
+
+### Metrics
+
+Enable a private Prometheus endpoint with `--enable-metrics :9094`. See the
+[monitoring examples](examples/monitoring/README.md) for metric semantics,
+scraping configuration, alert guidance, and a Grafana dashboard.

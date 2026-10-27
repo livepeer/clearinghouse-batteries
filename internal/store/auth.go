@@ -104,6 +104,7 @@ func (s *Store) Authorize(ctx context.Context, req AuthRequest) (Decision, error
 		// Activity timestamps are approximate observability data after creation.
 		// Conditional updates also suppress competing requests' stale touches.
 		if err := s.touchAuthorization(ctx, keyID, decision.AuthID, now); err != nil {
+			s.Metrics.Error("authorization", "activity_touch", "database")
 			slog.Warn("authorization activity touch failed", "session", decision.AuthID, "error", err)
 		}
 	}

@@ -1,0 +1,86 @@
+rule_files: [alerts.rules.json]
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    # All signals stay healthy for three samples, then fire together.
+    input_series:
+      - series: "up{job=\"clearinghouse\",instance=\"example\"}"
+        values: "1 1 1 0 0"
+      - series: "livepeer_clearinghouse_collector_success{collector=\"database\"}"
+        values: "1 1 1 0 0"
+      - series: "livepeer_clearinghouse_allocations_overdrawn{currency=\"eth\"}"
+        values: "0 0 0 1 1"
+      - series: "livepeer_clearinghouse_usage_events_total{clearinghouse=\"local\",outcome=\"quarantined\"}"
+        values: "0 0 0 1 1"
+      - series: "livepeer_clearinghouse_settlements{status=\"settled\",match_status=\"ambiguous\"}"
+        values: "0 0 0 1 1"
+      - series: "livepeer_clearinghouse_settlements_underpaid"
+        values: "0 0 0 1 1"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: ClearinghouseDown
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: ClearinghouseDown
+        exp_alerts:
+          - exp_labels:
+              job: "clearinghouse"
+              instance: "example"
+              severity: "critical"
+            exp_annotations:
+              summary: "Target unavailable; check the process and scrape endpoint."
+      - eval_time: 2m
+        alertname: ClearinghouseCollectorFailed
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: ClearinghouseCollectorFailed
+        exp_alerts:
+          - exp_labels:
+              collector: "database"
+              severity: "warning"
+            exp_annotations:
+              summary: "Collection failed; inspect collector errors and freshness."
+      - eval_time: 2m
+        alertname: ClearinghouseOverdrawn
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: ClearinghouseOverdrawn
+        exp_alerts:
+          - exp_labels:
+              currency: "eth"
+              severity: "warning"
+            exp_annotations:
+              summary: "Allocations overdrawn; inspect ledger reports and delayed usage."
+      - eval_time: 2m
+        alertname: ClearinghouseQuarantine
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: ClearinghouseQuarantine
+        exp_alerts:
+          - exp_labels:
+              clearinghouse: "local"
+              severity: "warning"
+            exp_annotations:
+              summary: "New quarantines; inspect usage records and validation failures."
+      - eval_time: 2m
+        alertname: ClearinghouseAmbiguousSettlement
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: ClearinghouseAmbiguousSettlement
+        exp_alerts:
+          - exp_labels:
+              status: "settled"
+              match_status: "ambiguous"
+              severity: "warning"
+            exp_annotations:
+              summary: "Ambiguous settlements remain; investigate session attribution."
+      - eval_time: 2m
+        alertname: ClearinghouseUnderpaidSettlement
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: ClearinghouseUnderpaidSettlement
+        exp_alerts:
+          - exp_labels:
+              severity: "critical"
+            exp_annotations:
+              summary: "Underpaid settlements remain; inspect payment shortfalls and escrow."
