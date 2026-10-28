@@ -45,6 +45,10 @@ func NewCurrency(t *testing.T, amount, currency string) *Fixture {
 	require.NoError(t, err)
 	f.KeyID, f.Key, err = f.DB.CreateKey(ctx, f.Allocation, "test key")
 	require.NoError(t, err)
+	// Unit fixtures explicitly supply fresh Kafka lag data; production Open
+	// never seeds health merely because a database or allocation exists.
+	now := time.Now().UnixMilli()
+	require.NoError(t, f.DB.SetKafkaLag(ctx, f.DB.KafkaTopic, store.KafkaLag{CheckedAt: now, CoveredThrough: now, Available: true}))
 	f.Request = store.AuthRequest{Headers: http.Header{"Authorization": []string{"Bearer " + f.Key}}, State: &store.RemoteState{StateID: "state-1", PMSessionID: PM, OrchestratorAddress: Orch, App: "test-app", Type: "live", FeeWei: "1", FeeUSD: "0.000000000000000001"}}
 	d, err := f.DB.Authorize(ctx, f.Request)
 	require.NoError(t, err)

@@ -12,8 +12,14 @@ func TestMetricBackfillCancellationDuringAmountScan(t *testing.T) {
 	db := openTestDB(t)
 	ctx := t.Context()
 	require.NoError(t, Up(ctx, db))
-	require.NoError(t, Down(ctx, db))
-	_, err := db.Exec(`INSERT INTO account_balances VALUES ('grant_unallocated','grant','eth','100');
+	list, err := List(ctx, db)
+	require.NoError(t, err)
+	for i := len(list) - 1; i >= 0; i-- {
+		if list[i].Applied && list[i].Filename >= "003_metric_summaries.sql" {
+			require.NoError(t, Down(ctx, db))
+		}
+	}
+	_, err = db.Exec(`INSERT INTO account_balances VALUES ('grant_unallocated','grant','eth','100');
  ALTER TABLE account_balances RENAME TO old_balances;
  CREATE VIEW account_balances AS SELECT account_type,account_id,currency,cancel_metric_amount(balance_units) AS balance_units FROM old_balances;`)
 	require.NoError(t, err)

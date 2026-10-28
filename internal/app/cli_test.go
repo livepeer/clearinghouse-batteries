@@ -292,7 +292,7 @@ func TestOrdinaryCommandsSkipMigrationPreflightButServeRejectsDrift(t *testing.T
 	if err := Execute(context.Background(), []string{"migrate", "status"}, &out, &out); err == nil || !strings.Contains(err.Error(), "unknown migration") {
 		t.Fatal(err)
 	}
-	p := ServeParams{Common: Common{DBPath: f.Path}, EnableAuthWebhook: mustHTTPBind(t, "127.0.0.1:8080"), CredsFile: testCredsFile(t)}
+	p := ServeParams{MaxKafkaLag: time.Minute, KafkaTopic: "livepeer-signing", Common: Common{DBPath: f.Path}, EnableAuthWebhook: mustHTTPBind(t, "127.0.0.1:8080"), CredsFile: testCredsFile(t)}
 	if err := Serve(context.Background(), p); err == nil || !strings.Contains(err.Error(), "unknown migration") {
 		t.Fatal(err)
 	}
@@ -322,7 +322,7 @@ func TestAllComponentCombinations(t *testing.T) {
 		t.Run(fmt.Sprint(mask), func(t *testing.T) {
 			dir := t.TempDir()
 			start := int64(0)
-			p := ServeParams{Common: Common{DBPath: filepath.Join(dir, "accounts.db")}, EnableKafka: mask&2 != 0, EnableOnchainListener: mask&4 != 0, CredsFile: testCredsFile(t), KafkaBind: testutil.Port(t), KafkaTopic: "events", RPCURL: srv.URL, ChainID: "42161", TicketBroker: testutil.Contract, SignerAddresses: []string{testutil.Sender}, StartBlock: &start, Confirmations: 0, BlockBatchSize: 10, ReorgLookback: 4, PollInterval: 10 * time.Millisecond}
+			p := ServeParams{MaxKafkaLag: time.Minute, Common: Common{DBPath: filepath.Join(dir, "accounts.db")}, EnableKafka: mask&2 != 0, EnableOnchainListener: mask&4 != 0, CredsFile: testCredsFile(t), KafkaBind: testutil.Port(t), KafkaTopic: "events", RPCURL: srv.URL, ChainID: "42161", TicketBroker: testutil.Contract, SignerAddresses: []string{testutil.Sender}, StartBlock: &start, Confirmations: 0, BlockBatchSize: 10, ReorgLookback: 4, PollInterval: 10 * time.Millisecond}
 			if enabled {
 				p.EnableMetrics = mustHTTPBind(t, testutil.Port(t))
 			}

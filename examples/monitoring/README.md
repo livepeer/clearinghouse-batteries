@@ -35,6 +35,10 @@ new usage; duplicate payloads at new offsets are counted separately. Apply delay
 measures completed events, not the oldest pending record. Future/missing event
 timestamps are excluded and counted.
 
+`authorization_decisions_total` records reasons `kafka_lag_exceeded` and
+`kafka_lag_unavailable` with decision `503`. See [Kafka lag](../../README.md#configure-kafka-lag)
+for enforcement and configuration.
+
 ## Alerts
 
 `alerts.rules.json` provides invariant-based examples. Adapt the target-down job

@@ -53,6 +53,10 @@ func Handler(db *store.Store, registry *serviceauth.Registry) http.Handler {
 			reason = "unknown_auth"
 		case "session is revoked or binding does not match":
 			reason = "session_binding"
+		case "kafka lag exceeded":
+			reason = "kafka_lag_exceeded"
+		case "kafka lag unavailable":
+			reason = "kafka_lag_unavailable"
 		}
 		db.Metrics.Add("authorization_decisions_total", 1, []string{"decision", "reason"}, strconv.Itoa(decision.Status), reason)
 		w.Header().Set("Content-Type", "application/json")

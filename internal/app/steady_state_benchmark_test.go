@@ -188,6 +188,7 @@ func benchmarkSteadyState(b *testing.B, layout benchmarkLayout, workers int, ena
 	kafkaAddr := benchmarkPort(b)
 	startBlock := int64(0)
 	params := ServeParams{
+		MaxKafkaLag:           time.Minute,
 		Common:                Common{DBPath: dbPath},
 		EnableAuthWebhook:     mustHTTPBind(b, httpAddr),
 		EnableKafka:           true,
@@ -281,7 +282,11 @@ func benchmarkSteadyState(b *testing.B, layout benchmarkLayout, workers int, ena
 	if err == nil {
 		err = waitBenchmark(warmupCtx, func() (bool, error) {
 			next, _, found, checkpointErr := observer.Checkpoint(warmupCtx, "kafka", store.KafkaStream(benchmarkTopic, 0))
-			return found && next == benchmarkWarmupEvents, checkpointErr
+			if checkpointErr != nil || !found || next != benchmarkWarmupEvents {
+				return false, checkpointErr
+			}
+			// The durable health proof can follow the commit on the next poll.
+			return authorizeBenchmarkTicket(warmupCtx, httpClient, httpAddr, credentials[0].authBody, credentials[0].session) == nil, nil
 		})
 	}
 	cancelWarmup()
@@ -463,6 +468,11 @@ func setupBenchmarkCredentials(ctx context.Context, path string, layout benchmar
 		return nil, err
 	}
 	defer db.Close()
+	// Session setup predates the live consumer; supply explicit fixture evidence.
+	now := time.Now().UnixMilli()
+	if err := db.SetKafkaLag(ctx, db.KafkaTopic, store.KafkaLag{CheckedAt: now, CoveredThrough: now, Available: true}); err != nil {
+		return nil, err
+	}
 	allocationAmount, _ := new(big.Int).SetString(benchmarkAllocationWei, 10)
 	allocationCount := int64(workers)
 	if layout == benchmarkShared {

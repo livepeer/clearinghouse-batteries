@@ -133,6 +133,10 @@ func activity(t *testing.T, db *store.Store, session, key string) (int64, int64)
 func TestExistingAuthorizationReadsWhileWritesAreBlocked(t *testing.T) {
 	f := testutil.New(t, "100")
 	ctx := context.Background()
+	now := time.Now()
+	ms := now.UnixMilli()
+	require.NoError(t, f.DB.SetKafkaLag(ctx, f.DB.KafkaTopic, store.KafkaLag{CheckedAt: ms, CoveredThrough: ms, Available: true}))
+	f.DB.Now = func() time.Time { return now }
 	beforeSeen, beforeUsed := activity(t, f.DB, f.Session, f.KeyID)
 	other, err := store.Open(ctx, f.Path, false)
 	require.NoError(t, err)
@@ -149,6 +153,13 @@ func TestExistingAuthorizationReadsWhileWritesAreBlocked(t *testing.T) {
 			t.Fatal(decision)
 		}
 	}
+	now = now.Add(time.Minute)
+	readCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	decision, err := f.DB.Authorize(readCtx, f.Request)
+	require.NoError(t, err)
+	require.Equal(t, 503, decision.Status)
+	require.Equal(t, "kafka lag unavailable", decision.Reason)
 	seen, used := activity(t, f.DB, f.Session, f.KeyID)
 	if seen != beforeSeen || used != beforeUsed {
 		t.Fatal("recent activity was rewritten")

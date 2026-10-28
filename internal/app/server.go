@@ -69,6 +69,7 @@ type ServeParams struct {
 	KafkaBind             string        `default:"127.0.0.1:9092" descr:"Embedded broker IP:port (loopback or private)"`
 	KafkaAdvertisedAddr   string        `optional:"true" descr:"Embedded broker host:port advertised to clients; defaults to KafkaBind"`
 	KafkaTopic            string        `default:"livepeer-signing" descr:"Kafka topic for issued tickets"`
+	MaxKafkaLag           time.Duration `default:"60s" descr:"Maximum Kafka consumer processing delay before signing pauses (minimum 1s)"`
 	RPCURL                string        `name:"rpc-url" optional:"true" secret:"true" descr:"On-chain RPC URL"`
 	RPCURLFile            string        `name:"rpc-url-file" secretfor:"RPCURL" descr:"File containing the on-chain RPC URL"`
 	ChainID               string        `name:"chain-id" optional:"true" descr:"Optional assertion for the RPC chain ID"`
@@ -135,7 +136,7 @@ func (p ServeParams) Validate() error {
 	if (webhookEnabled || managementEnabled || p.EnableKafka) && p.CredsFile == "" {
 		return errors.New("--creds-file is required for management, webhook, or embedded Kafka")
 	}
-	if p.EnableKafka || p.EnableAccounting {
+	if p.EnableKafka || p.EnableAccounting || webhookEnabled {
 		if !regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$`).MatchString(p.KafkaTopic) {
 			return errors.New("invalid Kafka topic")
 		}
@@ -158,6 +159,9 @@ func (p ServeParams) Validate() error {
 		if ip == nil || (!ip.IsLoopback() && !ip.IsPrivate()) {
 			return errors.New("kafka bind must be a concrete loopback or private IP (no public or wildcard bind)")
 		}
+	}
+	if p.MaxKafkaLag < store.MinKafkaLag {
+		return errors.New("--max-kafka-lag must be at least 1s")
 	}
 	if p.EnableOnchainListener {
 		if p.RPCURL == "" {
@@ -206,6 +210,8 @@ func Serve(ctx context.Context, p ServeParams) error {
 			return err
 		}
 		defer db.Close()
+		db.KafkaTopic = p.KafkaTopic
+		db.MaxKafkaLag = p.MaxKafkaLag
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -228,6 +234,12 @@ func Serve(ctx context.Context, p ServeParams) error {
 			return err
 		}
 		locks = append(locks, f)
+	}
+	if p.EnableAccounting {
+		// Invalidate previous-run evidence before any webhook can start.
+		if err := db.SetKafkaLag(ctx, p.KafkaTopic, store.KafkaLag{}); err != nil {
+			return err
+		}
 	}
 	var broker *minikafka.Broker
 	brokerAddr := p.KafkaBroker
@@ -257,7 +269,7 @@ func Serve(ctx context.Context, p ServeParams) error {
 	}
 	k := &kafka.Listener{DB: db, Broker: brokerAddr, Topic: p.KafkaTopic, Dialer: kafkaDialer, Metrics: telemetry}
 	c := &chain.Listener{DB: db, Config: p.chainConfig(), Metrics: telemetry}
-	done := make(chan error, 6)
+	done := make(chan error, 7)
 	count := 0
 	start := func(fn func(context.Context) error) { count++; go func() { done <- fn(ctx) }() }
 	if telemetry != nil {
@@ -310,6 +322,7 @@ func Serve(ctx context.Context, p ServeParams) error {
 	}
 	if p.EnableAccounting {
 		start(k.Run)
+		start(func(ctx context.Context) error { return k.MonitorLag(ctx, p.MaxKafkaLag) })
 	}
 	if p.EnableOnchainListener {
 		start(c.Run)

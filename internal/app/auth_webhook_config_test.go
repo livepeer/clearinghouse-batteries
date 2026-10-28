@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
@@ -51,23 +52,23 @@ func TestHTTPBindParsing(t *testing.T) {
 func TestAuthWebhookBindValidation(t *testing.T) {
 	for _, input := range []string{":8080", "127.0.0.2:8080", "[::1]:8080"} {
 		t.Run("loopback_"+input, func(t *testing.T) {
-			p := ServeParams{EnableAuthWebhook: mustHTTPBind(t, input), CredsFile: "creds.json"}
+			p := ServeParams{MaxKafkaLag: time.Minute, KafkaTopic: "livepeer-signing", EnableAuthWebhook: mustHTTPBind(t, input), CredsFile: "creds.json"}
 			require.NoError(t, p.Validate())
 		})
 	}
 
 	for _, input := range []string{"0.0.0.0:8080", "[::]:8080", "10.0.0.1:8080", "8.8.8.8:8080"} {
 		t.Run("non_loopback_"+input, func(t *testing.T) {
-			p := ServeParams{EnableAuthWebhook: mustHTTPBind(t, input), CredsFile: "creds.json"}
+			p := ServeParams{MaxKafkaLag: time.Minute, KafkaTopic: "livepeer-signing", EnableAuthWebhook: mustHTTPBind(t, input), CredsFile: "creds.json"}
 			require.ErrorContains(t, p.Validate(), "--unsafe-http-bind")
 			p.UnsafeHTTPBind = true
 			require.NoError(t, p.Validate())
 		})
 	}
 
-	p := ServeParams{EnableAuthWebhook: mustHTTPBind(t, ":8080")}
+	p := ServeParams{MaxKafkaLag: time.Minute, KafkaTopic: "livepeer-signing", EnableAuthWebhook: mustHTTPBind(t, ":8080")}
 	require.ErrorContains(t, p.Validate(), "--creds-file")
-	require.NoError(t, (ServeParams{UnsafeHTTPBind: true, EnableKafka: true, CredsFile: "creds.json", KafkaBind: "127.0.0.1:9092", KafkaTopic: "events"}).Validate())
+	require.NoError(t, (ServeParams{MaxKafkaLag: time.Minute, UnsafeHTTPBind: true, EnableKafka: true, CredsFile: "creds.json", KafkaBind: "127.0.0.1:9092", KafkaTopic: "events"}).Validate())
 }
 
 func TestServeConfigPrecedence(t *testing.T) {

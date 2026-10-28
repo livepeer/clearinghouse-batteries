@@ -10,12 +10,10 @@ Grants provide usage credits. Allocations define budgets within a grant, and
 each allocation can have multiple API keys. Payers (Livepeer gateways or remote
 signers) use these keys to authorize network payments.
 
-The clearinghouse authorization webhook checks the API key and the allocation's
-available balance. Payers log issued tickets to Kafka, and the accounting service
-validates those events and charges the allocation for usage.
-
-Authorization does not reserve funds. Delayed accounting can take an allocation
-negative before signing stops. Monitor accounting lag and quarantined events.
+The authorization webhook checks the API key, available balance, and
+[Kafka lag](#configure-kafka-lag). Payers log issued tickets to Kafka, and
+accounting validates them and charges the allocation. Authorization does not
+reserve funds, so delayed accounting can still overdraw an allocation.
 
 The optional on-chain listener records payments and escrow (deposit + reserve)
 activity. It matches settlements to sessions but does not charge for usage again.
@@ -134,6 +132,19 @@ Set `--kafka-topic` to match the signer. External accounting uses plaintext TCP;
 configure the broker's users and permissions separately. If go-livepeer shares
 this broker, provide TLS for its producer and a private plaintext connection
 for accounting, both using the same cluster and topic.
+
+### Configure Kafka lag
+
+The webhook denies authorization when accounting lag in any partition reaches
+the limit or cannot be determined, including at startup. It resumes when lag is
+within the limit and the other authorization checks pass. Idle, caught-up topics
+remain healthy; a backlog can remain when authorization resumes.
+
+Set `--max-kafka-lag` (default `60s`, minimum `1s`),
+`CLEARINGHOUSE_MAX_KAFKA_LAG`, or `MaxKafkaLag` in TOML. Separate accounting and
+webhook processes must use the same database, Kafka topic, and limit. Lag checks
+run even when metrics are disabled. They cover only events that reach Kafka;
+monitor signer outbox delivery and quarantined events separately.
 
 ### Enable on-chain reporting
 

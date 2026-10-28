@@ -60,12 +60,12 @@ func (s *Store) Authorize(ctx context.Context, req AuthRequest) (Decision, error
 		return denied, nil
 	}
 	hash := sha256.Sum256([]byte(parts[1]))
-	snapshot, err := readAuthorization(ctx, s.DB, keyID, req.State.StateID)
+	snapshot, err := readAuthorization(ctx, s.DB, keyID, req.State.StateID, s.KafkaTopic)
 	if err != nil {
 		return Decision{}, err
 	}
-	now := time.Now().UnixMilli()
-	decision, err := snapshot.decide(req.State, keyID, hash, now)
+	now := s.now().UnixMilli()
+	decision, err := snapshot.decide(req.State, keyID, hash, now, s.MaxKafkaLag)
 	if err != nil || decision.Status != 200 {
 		return decision, err
 	}
@@ -73,12 +73,12 @@ func (s *Store) Authorize(ctx context.Context, req AuthRequest) (Decision, error
 		// A session may have appeared or permissions may have changed since the
 		// initial read. Revalidate everything under the immediate write lock.
 		err = s.Write(ctx, func(tx *sql.Tx) error {
-			snapshot, err = readAuthorization(ctx, tx, keyID, req.State.StateID)
+			snapshot, err = readAuthorization(ctx, tx, keyID, req.State.StateID, s.KafkaTopic)
 			if err != nil {
 				return err
 			}
-			now = time.Now().UnixMilli()
-			decision, err = snapshot.decide(req.State, keyID, hash, now)
+			now = s.now().UnixMilli()
+			decision, err = snapshot.decide(req.State, keyID, hash, now, s.MaxKafkaLag)
 			if err != nil || decision.Status != 200 || decision.AuthID != "" {
 				return err
 			}
@@ -118,32 +118,36 @@ type authorizationSnapshot struct {
 	id, key, app, paymentType, orchestrator, status     string
 	lastSeen                                            int64
 	currency                                            string
+	lag                                                 KafkaLag
 }
 
 // A single SELECT supplies a consistent snapshot without BEGIN IMMEDIATE,
 // allowing authorization reads while another connection holds a WAL write lock.
-func readAuthorization(ctx context.Context, q querier, key, state string) (authorizationSnapshot, error) {
+func readAuthorization(ctx context.Context, q querier, key, state, topic string) (authorizationSnapshot, error) {
 	var a authorizationSnapshot
 	err := q.QueryRowContext(ctx, `
 SELECT k.secret_hash,k.allocation_id,k.revoked_at_ms,k.last_used_at_ms,
  a.status,g.status,a.starts_at_ms,a.ends_at_ms,g.starts_at_ms,g.ends_at_ms,a.currency,
  coalesce(b.balance_units,'0'),coalesce(s.id,''),coalesce(s.api_key_id,''),
  coalesce(s.app,''),coalesce(s.payment_type,''),coalesce(s.orchestrator,''),
- coalesce(s.status,''),coalesce(s.last_seen_at_ms,0)
+ coalesce(s.status,''),coalesce(s.last_seen_at_ms,0),
+ coalesce(h.checked_at_ms,0),coalesce(h.covered_through_ms,0),coalesce(h.available,0)
 FROM api_keys k JOIN grant_allocations a ON a.id=k.allocation_id
  JOIN grants g ON g.id=a.grant_id
  LEFT JOIN account_balances b ON b.account_type='allocation_available' AND b.account_id=a.id AND b.currency=a.currency
  LEFT JOIN payment_sessions s ON s.state_id=?
-WHERE k.id=?`, state, key).Scan(&a.saved, &a.allocation, &a.revoked, &a.lastUsed,
+ LEFT JOIN kafka_lag h ON h.topic=?
+WHERE k.id=?`, state, topic, key).Scan(&a.saved, &a.allocation, &a.revoked, &a.lastUsed,
 		&a.allocationStatus, &a.grantStatus, &a.start, &a.end, &a.grantStart, &a.grantEnd, &a.currency,
-		&a.balance, &a.id, &a.key, &a.app, &a.paymentType, &a.orchestrator, &a.status, &a.lastSeen)
+		&a.balance, &a.id, &a.key, &a.app, &a.paymentType, &a.orchestrator, &a.status, &a.lastSeen,
+		&a.lag.CheckedAt, &a.lag.CoveredThrough, &a.lag.Available)
 	if errors.Is(err, sql.ErrNoRows) {
 		return a, nil
 	}
 	return a, err
 }
 
-func (a authorizationSnapshot) decide(state *RemoteState, key string, hash [32]byte, now int64) (Decision, error) {
+func (a authorizationSnapshot) decide(state *RemoteState, key string, hash [32]byte, now int64, maxAge time.Duration) (Decision, error) {
 	if subtle.ConstantTimeCompare(hash[:], a.saved) != 1 || a.revoked.Valid {
 		return Decision{Status: 401, Reason: "invalid API key"}, nil
 	}
@@ -179,12 +183,13 @@ func (a authorizationSnapshot) decide(state *RemoteState, key string, hash [32]b
 		if state.AuthID != "" {
 			return Decision{Status: 403, Reason: "unknown auth_id"}, nil
 		}
-		return Decision{Status: 200}, nil // Caller must create the session transactionally.
-	}
-	if a.key != key || a.app != state.App || a.paymentType != state.Type || a.orchestrator != orch || a.status != "active" || (state.AuthID != "" && state.AuthID != a.id) {
+	} else if a.key != key || a.app != state.App || a.paymentType != state.Type || a.orchestrator != orch || a.status != "active" || (state.AuthID != "" && state.AuthID != a.id) {
 		return Decision{Status: 403, Reason: "session is revoked or binding does not match"}, nil
 	}
-	return Decision{Status: 200, AuthID: a.id}, nil
+	if reason := a.lag.reason(now, maxAge); reason != "" {
+		return Decision{Status: 503, Reason: reason}, nil
+	}
+	return Decision{Status: 200, AuthID: a.id}, nil // Caller creates a missing session transactionally.
 }
 
 func (s *Store) touchAuthorization(ctx context.Context, key, session string, now int64) error {
@@ -215,4 +220,45 @@ func apiKeyID(key string) (string, bool) {
 
 func inWindow(now int64, start, end sql.NullInt64) bool {
 	return (!start.Valid || now >= start.Int64) && (!end.Valid || now < end.Int64)
+}
+
+const DefaultKafkaTopic = "livepeer-signing"
+const DefaultMaxKafkaLag = time.Minute
+const MinKafkaLag = time.Second
+
+// KafkaLag records the latest check and confirmed consumer progress for a topic.
+// A zero coverage timestamp means no complete coverage has been established.
+type KafkaLag struct {
+	CheckedAt      int64
+	CoveredThrough int64
+	Available      bool
+}
+
+func (s *Store) SetKafkaLag(ctx context.Context, topic string, h KafkaLag) error {
+	return s.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO kafka_lag(topic,checked_at_ms,covered_through_ms,available) VALUES (?,?,?,?)
+ON CONFLICT(topic) DO UPDATE SET checked_at_ms=excluded.checked_at_ms,covered_through_ms=excluded.covered_through_ms,available=excluded.available`, topic, h.CheckedAt, h.CoveredThrough, h.Available)
+		return err
+	})
+}
+
+func (h KafkaLag) reason(now int64, maxAge time.Duration) string {
+	if maxAge < MinKafkaLag || !h.Available || h.CheckedAt <= 0 || h.CoveredThrough <= 0 ||
+		h.CheckedAt > now || h.CoveredThrough > h.CheckedAt {
+		return "kafka lag unavailable"
+	}
+	if time.UnixMilli(now).Sub(time.UnixMilli(h.CheckedAt)) >= maxAge {
+		return "kafka lag unavailable"
+	}
+	if time.UnixMilli(now).Sub(time.UnixMilli(h.CoveredThrough)) >= maxAge {
+		return "kafka lag exceeded"
+	}
+	return ""
+}
+
+func (s *Store) now() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
 }

@@ -43,14 +43,14 @@ func TestKafkaRegistryConfiguration(t *testing.T) {
 	path := testCredsFile(t)
 	registry, err := serviceauth.Load(path)
 	require.NoError(t, err)
-	p := ServeParams{EnableKafka: true, EnableAccounting: true, CredsFile: path, KafkaBind: "127.0.0.1:9092", KafkaTopic: "events"}
+	p := ServeParams{MaxKafkaLag: time.Minute, EnableKafka: true, EnableAccounting: true, CredsFile: path, KafkaBind: "127.0.0.1:9092", KafkaTopic: "events"}
 	require.NoError(t, p.Validate())
 	access, dialer, err := p.kafkaSecurity(registry)
 	require.NoError(t, err)
 	require.Len(t, access, 2)
 	require.NotNil(t, dialer)
 
-	external := ServeParams{EnableAccounting: true, KafkaBroker: "broker:9092", KafkaTopic: "events", CredsFile: path}
+	external := ServeParams{MaxKafkaLag: time.Minute, EnableAccounting: true, KafkaBroker: "broker:9092", KafkaTopic: "events", CredsFile: path}
 	require.NoError(t, external.Validate())
 	access, dialer, err = external.kafkaSecurity(registry)
 	require.NoError(t, err)
@@ -91,7 +91,7 @@ func TestExternalAccountingUsesRegistryCredential(t *testing.T) {
 	require.NoError(t, err)
 	brokerDone := make(chan error, 1)
 	go func() { brokerDone <- broker.Serve(ctx) }()
-	p := ServeParams{Common: Common{DBPath: dbPath}, EnableAccounting: true, KafkaBroker: broker.Addr(), KafkaTopic: "events", CredsFile: testCredsFile(t)}
+	p := ServeParams{MaxKafkaLag: time.Minute, Common: Common{DBPath: dbPath}, EnableAccounting: true, KafkaBroker: broker.Addr(), KafkaTopic: "events", CredsFile: testCredsFile(t)}
 	appDone := make(chan struct{})
 	var appErr error
 	go func() {
@@ -126,6 +126,7 @@ func TestEmbeddedKafkaAdvertisedAddr(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
 	p := ServeParams{
+		MaxKafkaLag:         time.Minute,
 		Common:              Common{DBPath: filepath.Join(t.TempDir(), "accounts.db")},
 		EnableKafka:         true,
 		EnableAccounting:    true,

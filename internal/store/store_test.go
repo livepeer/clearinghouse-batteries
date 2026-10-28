@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/livepeer/clearinghouse/internal/store"
 	"github.com/livepeer/clearinghouse/internal/testutil"
@@ -117,6 +118,20 @@ func insertMetricSettlement(t testing.TB, db *store.Store, id, face, paid, statu
 	require.NoError(t, err)
 }
 
+func rollbackMetricSummaries(t testing.TB, db *store.Store) {
+	t.Helper()
+	list, err := migrations.List(t.Context(), db.DB)
+	require.NoError(t, err)
+	for i := len(list) - 1; i >= 0; i-- {
+		if list[i].Applied && list[i].Filename >= "003_metric_summaries.sql" {
+			require.NoError(t, migrations.Down(t.Context(), db.DB))
+		}
+	}
+	var tables int
+	require.NoError(t, db.DB.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='metric_amounts'`).Scan(&tables))
+	require.Zero(t, tables, "summary rebuild requires rolling back migration 003")
+}
+
 func TestMetricBackfillExactAmountsAndQuarantineReasons(t *testing.T) {
 	amount := strings.Repeat("9", 256)
 	f := testutil.New(t, amount)
@@ -139,7 +154,7 @@ func TestMetricBackfillExactAmountsAndQuarantineReasons(t *testing.T) {
 		{ChainID: "42161", Contract: testutil.Contract, Sender: testutil.Orch, Deposit: amount, Reserve: "0"},
 	}))
 	checkAmount("escrow_deposit", twice)
-	require.NoError(t, migrations.Down(ctx, f.DB.DB))
+	rollbackMetricSummaries(t, f.DB)
 	insertMetricSettlement(t, f.DB, "one", amount, "1", "settled")
 	insertMetricSettlement(t, f.DB, "second", amount, "0", "settled")
 	insertMetricSettlement(t, f.DB, "orphaned", amount, "1", "orphaned")
@@ -168,7 +183,7 @@ func TestMetricBackfillExactAmountsAndQuarantineReasons(t *testing.T) {
 func TestMetricMigrationBackfillFailure(t *testing.T) {
 	f := testutil.New(t, "100")
 	ctx := t.Context()
-	require.NoError(t, migrations.Down(ctx, f.DB.DB))
+	rollbackMetricSummaries(t, f.DB)
 	_, err := f.DB.DB.Exec(`CREATE TRIGGER fail_metadata BEFORE INSERT ON migrations WHEN NEW.filename='003_metric_summaries.sql' BEGIN SELECT RAISE(ABORT,'backfill rollback'); END`)
 	require.NoError(t, err)
 	require.ErrorContains(t, migrations.Up(ctx, f.DB.DB), "backfill rollback")
@@ -180,7 +195,7 @@ func TestMetricMigrationBackfillFailure(t *testing.T) {
 	require.NoError(t, migrations.Up(ctx, f.DB.DB))
 	testutil.AssertMetricSnapshot(t, f.DB)
 	// Exercise an error in the monetary pass itself, after SQL initialization.
-	require.NoError(t, migrations.Down(ctx, f.DB.DB))
+	rollbackMetricSummaries(t, f.DB)
 	_, err = f.DB.DB.Exec(`PRAGMA ignore_check_constraints=ON; UPDATE account_balances SET balance_units='bad' WHERE account_type='allocation_available'`)
 	require.NoError(t, err)
 	require.ErrorContains(t, migrations.Up(ctx, f.DB.DB), "invalid metric amount")
@@ -488,8 +503,10 @@ func TestStableRematchDoesNotWriteSettlementMetrics(t *testing.T) {
 	f := testutil.New(t, "100")
 	insertMetricSettlement(t, f.DB, "redemption", "10", "7", "settled")
 	insertMetricSettlement(t, f.DB, "orphaned", "10", "7", "orphaned")
-	require.NoError(t, migrations.Down(t.Context(), f.DB.DB))
+	rollbackMetricSummaries(t, f.DB)
 	require.NoError(t, migrations.Up(t.Context(), f.DB.DB))
+	now := time.Now().UnixMilli()
+	require.NoError(t, f.DB.SetKafkaLag(t.Context(), f.DB.KafkaTopic, store.KafkaLag{CheckedAt: now, CoveredThrough: now, Available: true}))
 	require.NoError(t, f.DB.Ingest(t.Context(), "events", 0, 0, f.Event(t, "first", "1", testutil.PM)))
 	testutil.AssertMetricSnapshot(t, f.DB)
 	_, err := f.DB.DB.Exec(`CREATE TRIGGER fail_rematch BEFORE UPDATE ON settlements BEGIN SELECT RAISE(ABORT,'stable rematch wrote settlement'); END;
@@ -831,4 +848,114 @@ func TestAllocationBalanceAndAuthorization(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestKafkaLagAuthorization(t *testing.T) {
+	now := time.Unix(2_000_000_000, 0)
+	ms := now.UnixMilli()
+	for _, tc := range []struct {
+		name    string
+		h       store.KafkaLag
+		missing bool
+		want    string
+	}{
+		{name: "missing", missing: true, want: "kafka lag unavailable"},
+		{name: "unavailable", h: store.KafkaLag{CheckedAt: ms, CoveredThrough: ms}, want: "kafka lag unavailable"},
+		{name: "unknown coverage", h: store.KafkaLag{CheckedAt: ms, Available: true}, want: "kafka lag unavailable"},
+		{name: "unknown probe", h: store.KafkaLag{CoveredThrough: ms, Available: true}, want: "kafka lag unavailable"},
+		{name: "healthy", h: store.KafkaLag{CheckedAt: ms, CoveredThrough: ms, Available: true}},
+		{name: "below backlog limit", h: store.KafkaLag{CheckedAt: ms, CoveredThrough: ms - 59_999, Available: true}},
+		{name: "at backlog limit", h: store.KafkaLag{CheckedAt: ms, CoveredThrough: ms - 60_000, Available: true}, want: "kafka lag exceeded"},
+		{name: "above backlog limit", h: store.KafkaLag{CheckedAt: ms, CoveredThrough: ms - 60_001, Available: true}, want: "kafka lag exceeded"},
+		{name: "below probe limit", h: store.KafkaLag{CheckedAt: ms - 59_999, CoveredThrough: ms - 59_999, Available: true}},
+		{name: "at probe limit", h: store.KafkaLag{CheckedAt: ms - 60_000, CoveredThrough: ms - 60_000, Available: true}, want: "kafka lag unavailable"},
+		{name: "above probe limit", h: store.KafkaLag{CheckedAt: ms - 60_001, CoveredThrough: ms - 60_001, Available: true}, want: "kafka lag unavailable"},
+		{name: "future probe", h: store.KafkaLag{CheckedAt: ms + 1, CoveredThrough: ms, Available: true}, want: "kafka lag unavailable"},
+		{name: "future coverage", h: store.KafkaLag{CheckedAt: ms, CoveredThrough: ms + 1, Available: true}, want: "kafka lag unavailable"},
+		{name: "coverage after probe", h: store.KafkaLag{CheckedAt: ms - 1, CoveredThrough: ms, Available: true}, want: "kafka lag unavailable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := testutil.New(t, "100")
+			f.DB.Now = func() time.Time { return now }
+			_, err := f.DB.DB.Exec(`DELETE FROM kafka_lag; UPDATE payment_sessions SET last_seen_at_ms=1; UPDATE api_keys SET last_used_at_ms=1`)
+			require.NoError(t, err)
+			// Evidence for another topic must not authorize this topic.
+			require.NoError(t, f.DB.SetKafkaLag(t.Context(), "other", store.KafkaLag{CheckedAt: ms, CoveredThrough: ms, Available: true}))
+			if !tc.missing {
+				require.NoError(t, f.DB.SetKafkaLag(t.Context(), f.DB.KafkaTopic, tc.h))
+			}
+			for _, stateID := range []string{f.Request.State.StateID, "new-state"} {
+				state := *f.Request.State
+				state.StateID = stateID
+				req := f.Request
+				req.State = &state
+				d, err := f.DB.Authorize(t.Context(), req)
+				require.NoError(t, err)
+				require.Zero(t, d.Expiry)
+				if tc.want == "" {
+					require.Equal(t, 200, d.Status)
+					continue
+				}
+				require.Equal(t, 503, d.Status)
+				require.Equal(t, tc.want, d.Reason)
+				require.Empty(t, d.AuthID)
+				seen, used := activity(t, f.DB, f.Session, f.KeyID)
+				require.EqualValues(t, 1, seen)
+				require.EqualValues(t, 1, used)
+				var count int
+				require.NoError(t, f.DB.DB.QueryRow(`SELECT count(*) FROM payment_sessions`).Scan(&count))
+				require.Equal(t, 1, count)
+			}
+		})
+	}
+}
+
+func TestNewAuthorizationRechecksKafkaLag(t *testing.T) {
+	f := testutil.New(t, "100")
+	other, err := store.Open(t.Context(), f.Path, false)
+	require.NoError(t, err)
+	defer other.Close()
+	tx, err := other.DB.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	defer tx.Rollback()
+	read, resume := make(chan struct{}), make(chan struct{})
+	first := true
+	now := time.Now().Add(time.Second)
+	f.DB.Now = func() time.Time {
+		if first {
+			first = false
+			close(read)
+			<-resume
+		}
+		return now
+	}
+	state := *f.Request.State
+	state.StateID = "racing-new-state"
+	req := f.Request
+	req.State = &state
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	done := make(chan store.Decision, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		d, err := f.DB.Authorize(ctx, req)
+		done <- d
+		errCh <- err
+	}()
+	select {
+	case <-read:
+	case <-ctx.Done():
+		t.Fatal("initial authorization read blocked on writer")
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE kafka_lag SET available=0`)
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
+	close(resume)
+	require.NoError(t, <-errCh)
+	d := <-done
+	require.Equal(t, 503, d.Status)
+	require.Equal(t, "kafka lag unavailable", d.Reason)
+	var count int
+	require.NoError(t, f.DB.DB.QueryRow(`SELECT count(*) FROM payment_sessions`).Scan(&count))
+	require.Equal(t, 1, count)
 }

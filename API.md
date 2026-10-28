@@ -196,12 +196,14 @@ A rejection includes a reason, for example:
 {"status":401,"reason":"invalid API key","expiry":0}
 ```
 
-The response `status` can be `400`, `401`, `402`, or `403` for a rejection.
-`expiry` is currently `0`. The endpoint creates a session when needed and checks
-the key, grant, allocation, balance, fee, and session binding. Authorization does
-not reserve funds, so delayed accounting can overdraw an allocation. Malformed
-requests return HTTP `400` as plain text; an unavailable authorization service
-returns HTTP `503`.
+The response `status` can be `400`, `401`, `402`, `403`, or `503` for a rejection;
+`expiry` is currently `0`. The endpoint checks the key, grant, allocation, balance,
+fee, session binding, and [Kafka lag](README.md#configure-kafka-lag), creating a
+session when needed. A lag denial has status `503` and reason `kafka lag exceeded`
+or `kafka lag unavailable`; it creates no session or activity update. Authorization
+does not reserve funds, so delayed accounting can overdraw an allocation.
+Malformed requests return HTTP `400` as plain text; an unavailable authorization
+service returns HTTP `503`.
 
 ## Health
 

@@ -32,7 +32,7 @@ func metricSummaryState(t testing.TB, db *store.Store) map[string][]map[string]a
 func assertMetricSummaryRebuild(t testing.TB, db *store.Store) {
 	t.Helper()
 	before := metricSummaryState(t, db)
-	require.NoError(t, migrations.Down(t.Context(), db.DB))
+	rollbackMetricSummaries(t, db)
 	require.NoError(t, migrations.Up(t.Context(), db.DB))
 	require.Equal(t, before, metricSummaryState(t, db))
 	testutil.AssertMetricSnapshot(t, db)

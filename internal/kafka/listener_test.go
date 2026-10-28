@@ -1,11 +1,16 @@
 package kafka
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
-	"github.com/livepeer/clearinghouse/internal/metrics"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,6 +19,9 @@ import (
 	"github.com/j0sh/minikafka"
 	"github.com/j0sh/minikafka/storage/memory"
 	"github.com/j0sh/minikafka/storage/sqlite"
+	"github.com/livepeer/clearinghouse/internal/auth"
+	"github.com/livepeer/clearinghouse/internal/metrics"
+	"github.com/livepeer/clearinghouse/internal/serviceauth"
 	"github.com/livepeer/clearinghouse/internal/store"
 	"github.com/livepeer/clearinghouse/internal/testutil"
 	kgo "github.com/segmentio/kafka-go"
@@ -436,4 +444,215 @@ func TestMetricSnapshotDurablePartitionsAndRetry(t *testing.T) {
 	items, err = l.MetricSnapshot(ctx, l.DB)
 	require.ErrorContains(t, err, "checkpoint outside retained offsets")
 	require.Nil(t, items)
+}
+
+func TestKafkaLagCoverageMovingBacklogAndRecovery(t *testing.T) {
+	base := time.Unix(2_000_000_000, 0)
+	c := lagCoverage{maxAge: time.Minute}
+	sample := func(seconds, next, end int64) store.KafkaLag {
+		t.Helper()
+		at := base.Add(time.Duration(seconds) * time.Second)
+		h, err := c.update([]partitionSnapshot{
+			{Partition: 0, Next: next, End: end, ObservedAt: at},
+			{Partition: 1, Next: end, End: end, ObservedAt: at},
+		}, at.UnixMilli())
+		require.NoError(t, err)
+		return h
+	}
+	h := sample(0, 0, 0)
+	require.True(t, h.Available)
+	for tick := int64(1); tick <= 14; tick++ {
+		h = sample(tick*5, tick, tick*100)
+		require.Equal(t, base.UnixMilli(), h.CoveredThrough, "moving checkpoints must not renew coverage")
+	}
+	require.LessOrEqual(t, len(c.partitions[0].pending), 13)
+	h = sample(75, 1400, 1500)
+	require.Equal(t, base.Add(70*time.Second).UnixMilli(), h.CoveredThrough)
+	require.True(t, h.Available, "coverage can recover with a remaining backlog")
+	h = sample(80, 1500, 1500)
+	require.Equal(t, h.CheckedAt, h.CoveredThrough)
+	h = sample(300, 1500, 1500)
+	require.Equal(t, h.CheckedAt, h.CoveredThrough, "an idle topic stays fresh without commits")
+}
+
+func TestKafkaLagCoveragePartitionChangesAndRegression(t *testing.T) {
+	at := time.Unix(2_000_000_000, 0)
+	initial := []partitionSnapshot{{Partition: 0, Next: 5, End: 10, ObservedAt: at}, {Partition: 1, ObservedAt: at}}
+	for _, tc := range []struct {
+		name  string
+		parts []partitionSnapshot
+	}{
+		{"missing partition", initial[:1]},
+		{"checkpoint regression", []partitionSnapshot{{Partition: 0, Next: 4, End: 10, ObservedAt: at}, initial[1]}},
+		{"broker regression", []partitionSnapshot{{Partition: 0, Next: 5, End: 9, ObservedAt: at}, initial[1]}},
+		{"clock regression", []partitionSnapshot{{Partition: 0, Next: 5, End: 10, ObservedAt: at.Add(-time.Second)}, initial[1]}},
+		{"future observation", []partitionSnapshot{{Partition: 0, Next: 5, End: 10, ObservedAt: at.Add(time.Second)}, initial[1]}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := lagCoverage{maxAge: time.Minute}
+			h, err := c.update(initial, at.UnixMilli())
+			require.NoError(t, err)
+			require.False(t, h.Available, "first backlog has no coverage proof")
+			h, err = c.update(tc.parts, at.UnixMilli())
+			require.Error(t, err)
+			require.False(t, h.Available)
+		})
+	}
+	c := lagCoverage{maxAge: time.Minute}
+	_, err := c.update(initial[1:], at.UnixMilli())
+	require.NoError(t, err)
+	h, err := c.update(initial, at.UnixMilli())
+	require.NoError(t, err)
+	require.False(t, h.Available, "a new partition needs its own coverage proof")
+	initial[0].Next = 10
+	h, err = c.update(initial, at.UnixMilli())
+	require.NoError(t, err)
+	require.True(t, h.Available)
+}
+
+func TestKafkaLagCoverageRecoversAfterClockCorrection(t *testing.T) {
+	for _, backlog := range []bool{false, true} {
+		t.Run(fmt.Sprint("backlog=", backlog), func(t *testing.T) {
+			clock := time.Unix(2_000_000_000, 0)
+			c := lagCoverage{maxAge: time.Minute}
+			sample := func(next, end int64) (store.KafkaLag, error) {
+				return c.update([]partitionSnapshot{{Partition: 0, Next: next, End: end, ObservedAt: clock}}, clock.UnixMilli())
+			}
+			h, err := sample(5, 5)
+			require.NoError(t, err)
+			require.True(t, h.Available)
+			end := int64(5)
+			if backlog {
+				end = 10
+			}
+			clock = clock.Add(-10 * time.Minute)
+			h, err = sample(5, end)
+			require.ErrorContains(t, err, "clock moved backwards")
+			require.False(t, h.Available)
+			clock = clock.Add(5 * time.Second)
+			h, err = sample(5, end)
+			require.NoError(t, err)
+			if backlog {
+				require.False(t, h.Available, "a clock reset must not make old debt fresh")
+				clock = clock.Add(5 * time.Second)
+				h, err = sample(10, 11)
+				require.NoError(t, err)
+			}
+			require.True(t, h.Available, "new coverage recovers without waiting ten minutes")
+			require.LessOrEqual(t, h.CoveredThrough, clock.UnixMilli())
+			_, err = sample(4, end)
+			require.ErrorContains(t, err, "offsets moved backwards")
+		})
+	}
+}
+
+func TestKafkaLagWebhookPauseAndRecovery(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	f := testutil.New(t, "100")
+	backend := memory.Open()
+	require.NoError(t, backend.Init(ctx))
+	require.NoError(t, backend.CreateTopic(ctx, "events", minikafka.TopicOptions{Partitions: 2}))
+	broker, err := minikafka.Open(minikafka.Config{Addr: testutil.Port(t), Store: backend})
+	require.NoError(t, err)
+	brokerDone := make(chan error, 1)
+	go func() { brokerDone <- broker.Serve(ctx) }()
+	defer func() { cancel(); broker.Close(); require.NoError(t, <-brokerDone) }()
+	l := &Listener{DB: f.DB, Broker: broker.Addr(), Topic: "events"}
+	startConsumer := func() func() {
+		runCtx, stop := context.WithCancel(ctx)
+		done := make(chan error, 1)
+		go func() { done <- l.Run(runCtx) }()
+		testutil.Eventually(t, func() bool { return l.Ready.Load() })
+		return func() { stop(); require.NoError(t, <-done) }
+	}
+	stop := startConsumer()
+	// A distinct connection models a webhook-only process with metrics disabled.
+	webhookDB, err := store.Open(ctx, f.Path, false)
+	require.NoError(t, err)
+	defer webhookDB.Close()
+	webhookDB.KafkaTopic = l.Topic
+	clock := time.Unix(2_000_000_000, 0)
+	now := func() time.Time { return clock }
+	webhookDB.Now = now
+	path := filepath.Join(t.TempDir(), "creds.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{"credentials":[{"id":"signer","secret":"secret","webhook":{"authorize":true}}]}`), 0600))
+	registry, err := serviceauth.Load(path)
+	require.NoError(t, err)
+	handler := auth.Handler(webhookDB, registry)
+	call := func(status int, reason string) {
+		t.Helper()
+		body, err := json.Marshal(f.Request)
+		require.NoError(t, err)
+		req := httptest.NewRequest("POST", "/v1/signer/authorize", bytes.NewReader(body))
+		req.Header.Set("Livepeer-Clearinghouse-Token", "secret")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, req)
+		require.Equal(t, http.StatusOK, response.Code)
+		var d store.Decision
+		require.NoError(t, json.Unmarshal(response.Body.Bytes(), &d))
+		require.Equal(t, status, d.Status)
+		require.Equal(t, reason, d.Reason)
+		require.Zero(t, d.Expiry)
+		if status == 200 {
+			require.Equal(t, f.Session, d.AuthID)
+		}
+	}
+	coverage := &lagCoverage{maxAge: time.Minute}
+	call(503, "kafka lag unavailable")
+	require.NoError(t, coverage.poll(ctx, l, now))
+	call(200, "")
+	stop()
+	appendEvent := func(id, fee string) {
+		t.Helper()
+		_, err := backend.Append(ctx, minikafka.AppendRequest{Topic: l.Topic, Partition: 0, Records: []minikafka.Record{{Value: f.Event(t, id, fee, testutil.PM)}}})
+		require.NoError(t, err)
+	}
+	appendEvent("first", "20")
+	clock = clock.Add(5 * time.Second)
+	require.NoError(t, coverage.poll(ctx, l, now))
+	call(200, "")
+	clock = clock.Add(55 * time.Second)
+	require.NoError(t, coverage.poll(ctx, l, now))
+	call(503, "kafka lag exceeded")
+	require.Nil(t, webhookDB.Metrics)
+	webhookDB.Metrics = metrics.New("test", "test")
+	call(503, "kafka lag exceeded")
+	require.Equal(t, 1., testutil.MetricValue(t, webhookDB.Metrics, "authorization_decisions_total", map[string]string{"decision": "503", "reason": "kafka_lag_exceeded"}))
+	appendEvent("second", "20")
+	// Consume one actual Kafka record to make partial recovery deterministic.
+	reader, _, err := l.openReader(ctx, 0)
+	require.NoError(t, err)
+	readCtx, finish := context.WithTimeout(ctx, 5*time.Second)
+	msg, err := reader.ReadMessage(readCtx)
+	finish()
+	require.NoError(t, err)
+	require.NoError(t, reader.Close())
+	require.NoError(t, f.DB.Ingest(ctx, l.Topic, 0, msg.Offset, msg.Value))
+	clock = clock.Add(5 * time.Second)
+	require.NoError(t, coverage.poll(ctx, l, now))
+	call(200, "") // One record is still pending; no full catch-up latch.
+	// A reported probe failure immediately invalidates a recent good proof.
+	l.Dialer = &kgo.Dialer{DialFunc: func(context.Context, string, string) (net.Conn, error) { return nil, errors.New("probe failed") }}
+	require.Error(t, coverage.poll(ctx, l, now))
+	call(503, "kafka lag unavailable")
+	require.Equal(t, 1., testutil.MetricValue(t, webhookDB.Metrics, "authorization_decisions_total", map[string]string{"decision": "503", "reason": "kafka_lag_unavailable"}))
+	l.Dialer = nil
+	require.NoError(t, coverage.poll(ctx, l, now))
+	call(200, "")
+	stop = startConsumer()
+	defer stop()
+	testutil.Eventually(t, func() bool {
+		next, _, _, err := f.DB.Checkpoint(ctx, "kafka", store.KafkaStream(l.Topic, 0))
+		return err == nil && next == 2
+	})
+	require.NoError(t, coverage.poll(ctx, l, now))
+	call(200, "")
+	appendEvent("final", "100")
+	testutil.Eventually(t, func() bool {
+		next, _, _, err := f.DB.Checkpoint(ctx, "kafka", store.KafkaStream(l.Topic, 0))
+		return err == nil && next == 3
+	})
+	require.NoError(t, coverage.poll(ctx, l, now))
+	call(402, "allocation exhausted")
 }

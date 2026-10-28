@@ -20,8 +20,12 @@ import (
 )
 
 type Store struct {
-	DB      *sql.DB
-	Metrics *metrics.Metrics
+	DB          *sql.DB
+	Metrics     *metrics.Metrics
+	KafkaTopic  string
+	MaxKafkaLag time.Duration
+	// Now supplies the authorization clock; nil uses time.Now.
+	Now func() time.Time
 }
 
 func Open(ctx context.Context, path string, migrate bool) (*Store, error) {
@@ -68,7 +72,7 @@ func Open(ctx context.Context, path string, migrate bool) (*Store, error) {
 			return nil, err
 		}
 	}
-	return &Store{DB: db}, nil
+	return &Store{DB: db, KafkaTopic: DefaultKafkaTopic, MaxKafkaLag: DefaultMaxKafkaLag}, nil
 }
 
 func (s *Store) Close() error { return s.DB.Close() }
