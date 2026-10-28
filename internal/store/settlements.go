@@ -80,6 +80,9 @@ func (s *Store) BootstrapChain(ctx context.Context, stream string, anchor Block,
 				return err
 			}
 			treasury, escrow := treasuryOwner(snapshot.ChainID, snapshot.Sender), escrowOwner(snapshot.ChainID, snapshot.Contract, snapshot.Sender)
+			if err := registerEscrowMetrics(ctx, tx, id, escrow); err != nil {
+				return err
+			}
 			if err := Transfer(ctx, tx, "snapshot:"+id+":deposit", "opening deposit", "escrow_snapshot", id, "treasury_cash", treasury, "escrow_deposit", escrow, deposit); err != nil {
 				return err
 			}
@@ -89,6 +92,26 @@ func (s *Store) BootstrapChain(ctx context.Context, stream string, anchor Block,
 		}
 		return SetCheckpoint(ctx, tx, "chain", stream, anchor.Number+1, anchor.Hash)
 	})
+}
+
+func registerEscrowMetrics(ctx context.Context, tx *sql.Tx, id, owner string) error {
+	for _, bucket := range []string{"deposit", "reserve"} {
+		account := "escrow_" + bucket
+		balance, err := Balance(ctx, tx, account, owner)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO metric_balances VALUES (?,?,'eth',?,?)`, account, owner, id, balance.String()); err != nil {
+			return err
+		}
+		if err := changeMetricAmount(ctx, tx, account, "eth", balance); err != nil {
+			return err
+		}
+		if err := changeMetricCount(ctx, tx, "escrow_unfunded_signers", bucket, "", boolCount(balance.Sign() == 0)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) ApplyChain(ctx context.Context, stream string, blocks []Block, events []EscrowEvent, lookback int64) error {
@@ -250,9 +273,10 @@ func applySettlement(ctx context.Context, tx *sql.Tx, event Settlement) error {
 		return errors.New("invalid redemption payment split")
 	}
 	var id, status string
+	match := "unmatched"
 	var generation int64
 	var stored Settlement
-	err = tx.QueryRowContext(ctx, `SELECT id,status,generation,block_number,sender,recipient,face_value_wei,paid_amount_wei,deposit_paid_wei,reserve_paid_wei,win_probability,sender_nonce,recipient_rand,pm_session_id,aux_data FROM settlements WHERE chain_id=? AND contract_address=? AND block_hash=? AND tx_hash=? AND log_index=?`, event.ChainID, event.Contract, event.BlockHash, event.TxHash, event.LogIndex).Scan(&id, &status, &generation, &stored.BlockNumber, &stored.Sender, &stored.Recipient, &stored.FaceValue, &stored.PaidAmount, &stored.DepositPaid, &stored.ReservePaid, &stored.WinProb, &stored.Nonce, &stored.Rand, &stored.PMSessionID, &stored.AuxData)
+	err = tx.QueryRowContext(ctx, `SELECT id,status,match_status,generation,block_number,sender,recipient,face_value_wei,paid_amount_wei,deposit_paid_wei,reserve_paid_wei,win_probability,sender_nonce,recipient_rand,pm_session_id,aux_data FROM settlements WHERE chain_id=? AND contract_address=? AND block_hash=? AND tx_hash=? AND log_index=?`, event.ChainID, event.Contract, event.BlockHash, event.TxHash, event.LogIndex).Scan(&id, &status, &match, &generation, &stored.BlockNumber, &stored.Sender, &stored.Recipient, &stored.FaceValue, &stored.PaidAmount, &stored.DepositPaid, &stored.ReservePaid, &stored.WinProb, &stored.Nonce, &stored.Rand, &stored.PMSessionID, &stored.AuxData)
 	if err == nil {
 		if stored.BlockNumber != event.BlockNumber || stored.Sender != event.Sender || stored.Recipient != event.Recipient || stored.FaceValue != event.FaceValue || stored.PaidAmount != event.PaidAmount || stored.DepositPaid != event.DepositPaid || stored.ReservePaid != event.ReservePaid || stored.WinProb != event.WinProb || stored.Nonce != event.Nonce || stored.Rand != event.Rand || stored.PMSessionID != event.PMSessionID || stored.AuxData != event.AuxData {
 			return errors.New("settlement log identity reused with different data")
@@ -269,6 +293,9 @@ func applySettlement(ctx context.Context, tx *sql.Tx, event Settlement) error {
 		_, err = tx.ExecContext(ctx, `UPDATE settlements SET status='settled',generation=?,settled_at_ms=? WHERE id=?`, generation, event.Timestamp, id)
 	}
 	if err != nil {
+		return err
+	}
+	if err := updateSettlementMetrics(ctx, tx, status, "settled", match, faceValue, paid); err != nil {
 		return err
 	}
 	escrow := escrowOwner(event.ChainID, event.Contract, event.Sender)
@@ -297,6 +324,34 @@ func applySettlement(ctx context.Context, tx *sql.Tx, event Settlement) error {
 	return rematch(ctx, tx, event.PMSessionID, event.Recipient)
 }
 
+func updateSettlementMetrics(ctx context.Context, tx *sql.Tx, old, next, match string, face, paid *big.Int) error {
+	if old == next {
+		return nil
+	}
+	if old != "" {
+		if err := changeMetricCount(ctx, tx, "settlements", old, match, -1); err != nil {
+			return err
+		}
+	}
+	if err := changeMetricCount(ctx, tx, "settlements", next, match, 1); err != nil {
+		return err
+	}
+	sign := boolCount(next == "settled") - boolCount(old == "settled")
+	shortfall := new(big.Int)
+	if face.Cmp(paid) > 0 {
+		shortfall.Sub(face, paid)
+	}
+	for _, item := range []struct {
+		name string
+		n    *big.Int
+	}{{"settlement_face_value", face}, {"settlement_paid", paid}, {"settlement_shortfall", shortfall}} {
+		if err := changeMetricAmount(ctx, tx, item.name, "eth", new(big.Int).Mul(item.n, big.NewInt(sign))); err != nil {
+			return err
+		}
+	}
+	return changeMetricCount(ctx, tx, "settlements_underpaid", "", "", sign*boolCount(shortfall.Sign() > 0))
+}
+
 // Rewind is called only after RPC headers prove a common ancestor. No usage postings are reversed.
 func (s *Store) Rewind(ctx context.Context, stream, chain, contract string, ancestor Block) error {
 	return s.Write(ctx, func(tx *sql.Tx) error {
@@ -308,17 +363,17 @@ func (s *Store) Rewind(ctx context.Context, stream, chain, contract string, ance
 			return ErrEscrowSnapshotReorg
 		}
 		type settlementReversal struct {
-			id, sender, deposit, reserve string
-			generation                   int64
+			id, sender, deposit, reserve, face, paid, match string
+			generation                                      int64
 		}
-		rows, err := tx.QueryContext(ctx, `SELECT id,sender,deposit_paid_wei,reserve_paid_wei,generation FROM settlements WHERE chain_id=? AND contract_address=? AND status='settled' AND block_number>? ORDER BY block_number DESC,log_index DESC`, chain, contract, ancestor.Number)
+		rows, err := tx.QueryContext(ctx, `SELECT id,sender,deposit_paid_wei,reserve_paid_wei,generation,face_value_wei,paid_amount_wei,match_status FROM settlements WHERE chain_id=? AND contract_address=? AND status='settled' AND block_number>? ORDER BY block_number DESC,log_index DESC`, chain, contract, ancestor.Number)
 		if err != nil {
 			return err
 		}
 		var settlements []settlementReversal
 		for rows.Next() {
 			var reversal settlementReversal
-			if err := rows.Scan(&reversal.id, &reversal.sender, &reversal.deposit, &reversal.reserve, &reversal.generation); err != nil {
+			if err := rows.Scan(&reversal.id, &reversal.sender, &reversal.deposit, &reversal.reserve, &reversal.generation, &reversal.face, &reversal.paid, &reversal.match); err != nil {
 				rows.Close()
 				return err
 			}
@@ -344,6 +399,17 @@ func (s *Store) Rewind(ctx context.Context, stream, chain, contract string, ance
 				return err
 			}
 			if err := Transfer(ctx, tx, key+":reserve", "orphaned reserve payment reversal", "settlement", reversal.id, "treasury_settled_spend", spend, "escrow_reserve", escrow, reserve); err != nil {
+				return err
+			}
+			face, err := Amount(reversal.face)
+			if err != nil {
+				return err
+			}
+			paid, err := Amount(reversal.paid)
+			if err != nil {
+				return err
+			}
+			if err := updateSettlementMetrics(ctx, tx, "settled", "orphaned", reversal.match, face, paid); err != nil {
 				return err
 			}
 			if _, err := tx.ExecContext(ctx, `UPDATE settlements SET status='orphaned' WHERE id=?`, reversal.id); err != nil {

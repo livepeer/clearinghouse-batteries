@@ -207,6 +207,11 @@ func apply(ctx context.Context, db *sql.DB, item migration, down bool) error {
 	if _, err = tx.ExecContext(ctx, script); err != nil {
 		return fmt.Errorf("migration %s: %w", item.Filename, err)
 	}
+	if !down && item.Filename == "003_metric_summaries.sql" {
+		if err := backfillMetricAmounts(ctx, tx); err != nil {
+			return fmt.Errorf("migration %s: %w", item.Filename, err)
+		}
+	}
 	if down {
 		_, err = tx.ExecContext(ctx, `DELETE FROM migrations WHERE filename=?`, item.Filename)
 	} else {

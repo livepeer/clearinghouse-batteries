@@ -142,6 +142,11 @@ func (s *Store) Ingest(ctx context.Context, topic string, partition int, offset 
 			return err
 		}
 		outcome, detail = status, reason
+		if status == "quarantined" {
+			if err := changeMetricCount(ctx, tx, "quarantines", QuarantineReason(reason), "", 1); err != nil {
+				return err
+			}
+		}
 		if status == "applied" {
 			applied, chargedCurrency = ev, currency
 			aid := ID()
@@ -164,8 +169,18 @@ func (s *Store) Ingest(ctx context.Context, topic string, partition int, offset 
 				if balance.Sign() < 0 {
 					overdraw, overdrawCurrency = balance.String(), currency
 				}
-				if _, err := tx.ExecContext(ctx, `UPDATE grant_allocations SET status='exhausted' WHERE id=? AND status='active'`, allocation); err != nil {
+				r, err := tx.ExecContext(ctx, `UPDATE grant_allocations SET status='exhausted' WHERE id=? AND status='active'`, allocation)
+				if err != nil {
 					return err
+				}
+				n, err := r.RowsAffected()
+				if err != nil {
+					return err
+				}
+				if n > 0 {
+					if err := changeInventory(ctx, tx, "allocations", currency, "active", "exhausted"); err != nil {
+						return err
+					}
 				}
 			}
 			if err := rematch(ctx, tx, ev.PMSessionID, ev.Orchestrator); err != nil {
@@ -244,7 +259,45 @@ func rematch(ctx context.Context, tx *sql.Tx, pm, orch string) error {
 	} else if len(ids) > 1 {
 		status = "ambiguous"
 	}
-	_, err = tx.ExecContext(ctx, `UPDATE settlements SET payment_session_id=?,match_status=? WHERE pm_session_id=? AND recipient=?`, id, status, pm, orch)
+	// Stable attribution must not rewrite historical settlements or their counts.
+	const changed = `pm_session_id=? AND recipient=? AND (match_status<>? OR payment_session_id IS NOT ?)`
+	rows, err = tx.QueryContext(ctx, `SELECT status,match_status,count(*) FROM settlements WHERE `+changed+` GROUP BY status,match_status`, pm, orch, status, id)
+	if err != nil {
+		return err
+	}
+	type bucket struct {
+		state, match string
+		count        int64
+	}
+	var buckets []bucket
+	for rows.Next() {
+		var b bucket
+		if err := rows.Scan(&b.state, &b.match, &b.count); err != nil {
+			rows.Close()
+			return err
+		}
+		buckets = append(buckets, b)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	if len(buckets) == 0 {
+		return nil
+	}
+	for _, b := range buckets {
+		if b.match == status {
+			continue
+		}
+		if err := changeMetricCount(ctx, tx, "settlements", b.state, b.match, -b.count); err != nil {
+			return err
+		}
+		if err := changeMetricCount(ctx, tx, "settlements", b.state, status, b.count); err != nil {
+			return err
+		}
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE settlements SET payment_session_id=?,match_status=? WHERE `+changed, id, status, pm, orch, status, id)
 	return err
 }
 

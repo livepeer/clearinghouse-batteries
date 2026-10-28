@@ -95,6 +95,9 @@ func createGrant(ctx context.Context, tx *sql.Tx, p Create) (string, error) {
 	if _, err := tx.ExecContext(ctx, `INSERT INTO grants(id,name,sponsor,total_units,currency,starts_at_ms,ends_at_ms,status,metadata,created_at_ms) VALUES (?,?,?,?,?,?,?,?,?,?)`, id, p.Name, p.Sponsor, n.String(), p.Currency, p.Starts, p.Ends, p.Status, p.Metadata, time.Now().UnixMilli()); err != nil {
 		return "", err
 	}
+	if err := changeInventory(ctx, tx, "grants", p.Currency, "", p.Status); err != nil {
+		return "", err
+	}
 	return id, TransferCurrency(ctx, tx, "create:"+id, "grant funding", "grant", id, "grant_funding_source", id, "grant_unallocated", id, p.Currency, n)
 }
 
@@ -138,6 +141,9 @@ func createAllocation(ctx context.Context, tx *sql.Tx, p Create) (string, error)
 	}
 	id := ID()
 	if _, err := tx.ExecContext(ctx, `INSERT INTO grant_allocations(id,grant_id,name,beneficiary,allocated_units,currency,starts_at_ms,ends_at_ms,status,metadata,created_at_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?)`, id, p.GrantID, p.Name, p.Beneficiary, n.String(), currency, p.Starts, p.Ends, p.Status, p.Metadata, time.Now().UnixMilli()); err != nil {
+		return "", err
+	}
+	if err := changeInventory(ctx, tx, "allocations", currency, "", p.Status); err != nil {
 		return "", err
 	}
 	return id, TransferCurrency(ctx, tx, "create:"+id, "grant allocation", "allocation", id, "grant_unallocated", p.GrantID, "allocation_available", id, currency, n)
@@ -210,8 +216,12 @@ func fundCurrency(ctx context.Context, tx *sql.Tx, kind, id, value, currency str
 	if err != nil {
 		return err
 	}
+	previousStatus := status
 	if status == "exhausted" && bal.Sign() > 0 {
 		status = "active"
+	}
+	if err := changeInventory(ctx, tx, "allocations", actualCurrency, previousStatus, status); err != nil {
+		return err
 	}
 	_, err = tx.ExecContext(ctx, `UPDATE grant_allocations SET allocated_units=?,status=? WHERE id=?`, total.String(), status, id)
 	return err
@@ -246,12 +256,15 @@ func (s *Store) SetStatus(ctx context.Context, kind, id, status string) error {
 			if !oneOf(status, "draft", "active", "paused", "closed") {
 				return invalidInput("invalid grant status")
 			}
-			var old string
-			if err := tx.QueryRowContext(ctx, `SELECT status FROM grants WHERE id=?`, id).Scan(&old); err != nil {
+			var old, currency string
+			if err := tx.QueryRowContext(ctx, `SELECT status,currency FROM grants WHERE id=?`, id).Scan(&old, &currency); err != nil {
 				return err
 			}
 			if old == "closed" && status != old {
 				return stateConflict("closed grant cannot be reopened")
+			}
+			if err := changeInventory(ctx, tx, "grants", currency, old, status); err != nil {
+				return err
 			}
 			_, err := tx.ExecContext(ctx, `UPDATE grants SET status=? WHERE id=?`, status, id)
 			return err
@@ -286,6 +299,9 @@ func (s *Store) SetStatus(ctx context.Context, kind, id, status string) error {
 				}
 				n.Sub(n, bal)
 				allocated = n.String()
+			}
+			if err := changeInventory(ctx, tx, "allocations", currency, old, status); err != nil {
+				return err
 			}
 			_, err = tx.ExecContext(ctx, `UPDATE grant_allocations SET status=?,allocated_units=? WHERE id=?`, status, allocated, id)
 			return err

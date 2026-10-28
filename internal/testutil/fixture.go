@@ -60,7 +60,7 @@ func NewCurrency(t *testing.T, amount, currency string) *Fixture {
 func (f *Fixture) ManagementState(t *testing.T) map[string][]map[string]any {
 	t.Helper()
 	state := map[string][]map[string]any{}
-	for _, table := range []string{"grants", "grant_allocations", "api_keys", "ledger_transactions", "ledger_entries", "account_balances", "management_idempotency"} {
+	for _, table := range []string{"grants", "grant_allocations", "api_keys", "ledger_transactions", "ledger_entries", "account_balances", "management_idempotency", "metric_amounts", "metric_counts", "metric_balances"} {
 		rows, err := f.DB.Rows(t.Context(), "SELECT * FROM "+table+" ORDER BY rowid")
 		require.NoError(t, err)
 		state[table] = rows

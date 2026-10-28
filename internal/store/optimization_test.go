@@ -70,6 +70,7 @@ func TestAllocationBalanceQueryIsolation(t *testing.T) {
 				return nil
 			}))
 
+			testutil.AssertMetricSnapshot(t, f.DB)
 			list, err := f.DB.List(ctx, "allocation", store.ListOptions{})
 			require.NoError(t, err)
 			require.Len(t, list, 2)

@@ -296,7 +296,9 @@ unused funds, use `allocation revoke` or `POST /v1/allocations/{id}/revoke`
 ### Database management
 
 `serve` applies pending migrations. Before running CLI management or reports on
-a new database or after upgrading, run `migrate up`. `migrate down` can destroy
+a new database or after upgrading, run `migrate up`. Stop all services and
+management commands writing to a shared database before an upgrade, and restart
+all writers with the same release after migrating. `migrate down` can destroy
 accounting data; use it only on disposable databases or after a verified backup.
 
 For backups, use Litestream or stop all clearinghouse processes and management

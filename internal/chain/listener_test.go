@@ -567,6 +567,7 @@ func TestInvalidPaymentSequencesDoNotAdvance(t *testing.T) {
 
 func assertFinancialMetrics(t *testing.T, l *Listener, face, paid int64, match string) {
 	t.Helper()
+	testutil.AssertMetricSnapshot(t, l.DB)
 	items, err := store.MetricSnapshot(t.Context(), l.DB.DB, false, true)
 	require.NoError(t, err)
 	l.Metrics.Snapshot("financial", items)

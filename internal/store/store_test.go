@@ -89,7 +89,7 @@ func TestMigrationsConstraintsAndRoundTrip(t *testing.T) {
 	for i, index := range indexes {
 		actual[i] = index["name"].(string)
 	}
-	require.ElementsMatch(t, []string{"allocations_grant", "keys_allocation", "sessions_allocation", "usage_status", "usage_session", "usage_manifest", "signing_match", "balances_owner", "ledger_account", "ledger_transaction", "settlements_match", "settlements_block", "settlements_session", "ticket_broker_events_block", "ticket_broker_events_sender"}, actual)
+	require.ElementsMatch(t, []string{"allocations_grant", "keys_allocation", "sessions_allocation", "usage_status", "usage_session", "usage_manifest", "signing_match", "balances_owner", "ledger_account", "ledger_transaction", "settlements_match", "settlements_block", "settlements_session", "ticket_broker_events_block", "ticket_broker_events_sender", "metric_balances_owner", "metric_balances_negative", "metric_balances_nonnegative", "settlements_oldest_unmatched", "escrow_snapshots_block"}, actual)
 	require.NoError(t, migrations.Up(ctx, f.DB.DB))
 	list, err := migrations.List(ctx, f.DB.DB)
 	require.NoError(t, err)
@@ -106,6 +106,90 @@ func TestMigrationsConstraintsAndRoundTrip(t *testing.T) {
 	if count != 0 {
 		t.Fatal(count)
 	}
+}
+
+// Legacy data can be inserted without write helpers, then upgraded atomically.
+func insertMetricSettlement(t testing.TB, db *store.Store, id, face, paid, status string) {
+	t.Helper()
+	hash := sha256.Sum256([]byte(id))
+	_, err := db.DB.Exec(`INSERT INTO settlements (id,chain_id,contract_address,tx_hash,log_index,block_number,block_hash,sender,recipient,face_value_wei,paid_amount_wei,deposit_paid_wei,reserve_paid_wei,win_probability,sender_nonce,recipient_rand,pm_session_id,aux_data,match_status,status,created_at_ms,settled_at_ms)
+ VALUES (?,'42161',?,?,0,1,?,?,?, ?,?,?,'0','1','0','0',?,'0x','unmatched',?,1234,1234)`, id, testutil.Contract, fmt.Sprintf("0x%x", hash), testutil.PM, testutil.Sender, testutil.Orch, face, paid, paid, testutil.PM, status)
+	require.NoError(t, err)
+}
+
+func TestMetricBackfillExactAmountsAndQuarantineReasons(t *testing.T) {
+	amount := strings.Repeat("9", 256)
+	f := testutil.New(t, amount)
+	ctx := t.Context()
+	_, err := f.DB.Create(ctx, "grant", store.Create{Name: "second", Amount: amount, Currency: "eth"})
+	require.NoError(t, err)
+	checkAmount := func(name, want string) {
+		t.Helper()
+		var got string
+		require.NoError(t, f.DB.DB.QueryRow(`SELECT amount_units FROM metric_amounts WHERE name=? AND currency='eth'`, name).Scan(&got))
+		require.Equal(t, want, got)
+	}
+	// Force aggregate growth beyond the input limit without rounding a unit away.
+	require.NoError(t, f.DB.Fund(ctx, "grant", f.Grant, amount))
+	n, _ := new(big.Int).SetString(amount, 10)
+	twice := new(big.Int).Mul(n, big.NewInt(2)).String()
+	checkAmount("grant_unallocated", twice)
+	require.NoError(t, f.DB.BootstrapChain(ctx, "chain", store.Block{Number: -1}, []store.EscrowSnapshot{
+		{ChainID: "42161", Contract: testutil.Contract, Sender: testutil.Sender, Deposit: amount, Reserve: "0"},
+		{ChainID: "42161", Contract: testutil.Contract, Sender: testutil.Orch, Deposit: amount, Reserve: "0"},
+	}))
+	checkAmount("escrow_deposit", twice)
+	require.NoError(t, migrations.Down(ctx, f.DB.DB))
+	insertMetricSettlement(t, f.DB, "one", amount, "1", "settled")
+	insertMetricSettlement(t, f.DB, "second", amount, "0", "settled")
+	insertMetricSettlement(t, f.DB, "orphaned", amount, "1", "orphaned")
+	reasons := []string{"", "malformed envelope or missing event id/type/data", "event id reused with different payload", "malformed signed-ticket data", "missing auth_id or unknown payment session", "event does not match session binding", "invalid fee, ticket count, request, timestamp, or PM session", "USD fee unavailable", "unknown one", "unknown two"}
+	for i, reason := range reasons {
+		_, err := f.DB.DB.Exec(`INSERT INTO usage_events(id,topic,partition,offset,raw_payload,status,error,created_at_ms) VALUES (?,'legacy',0,?,X'','quarantined',?,1)`, fmt.Sprint(i), i, reason)
+		require.NoError(t, err)
+	}
+	require.NoError(t, migrations.Up(ctx, f.DB.DB))
+	checkAmount("grant_unallocated", twice)
+	checkAmount("escrow_deposit", twice)
+	checkAmount("settlement_face_value", twice)
+	checkAmount("settlement_shortfall", new(big.Int).Sub(new(big.Int).Mul(n, big.NewInt(2)), big.NewInt(1)).String())
+	for _, reason := range reasons {
+		var got int
+		require.NoError(t, f.DB.DB.QueryRow(`SELECT value FROM metric_counts WHERE kind='quarantines' AND label1=?`, store.QuarantineReason(reason)).Scan(&got))
+		want := 1
+		if store.QuarantineReason(reason) == "other" {
+			want = 2
+		}
+		require.Equal(t, want, got)
+	}
+	assertMetricSummaryRebuild(t, f.DB)
+}
+
+func TestMetricMigrationBackfillFailure(t *testing.T) {
+	f := testutil.New(t, "100")
+	ctx := t.Context()
+	require.NoError(t, migrations.Down(ctx, f.DB.DB))
+	_, err := f.DB.DB.Exec(`CREATE TRIGGER fail_metadata BEFORE INSERT ON migrations WHEN NEW.filename='003_metric_summaries.sql' BEGIN SELECT RAISE(ABORT,'backfill rollback'); END`)
+	require.NoError(t, err)
+	require.ErrorContains(t, migrations.Up(ctx, f.DB.DB), "backfill rollback")
+	var count int
+	require.NoError(t, f.DB.DB.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name LIKE 'metric_%' OR name='settlements_oldest_unmatched' OR name='escrow_snapshots_block'`).Scan(&count))
+	require.Zero(t, count)
+	_, err = f.DB.DB.Exec(`DROP TRIGGER fail_metadata`)
+	require.NoError(t, err)
+	require.NoError(t, migrations.Up(ctx, f.DB.DB))
+	testutil.AssertMetricSnapshot(t, f.DB)
+	// Exercise an error in the monetary pass itself, after SQL initialization.
+	require.NoError(t, migrations.Down(ctx, f.DB.DB))
+	_, err = f.DB.DB.Exec(`PRAGMA ignore_check_constraints=ON; UPDATE account_balances SET balance_units='bad' WHERE account_type='allocation_available'`)
+	require.NoError(t, err)
+	require.ErrorContains(t, migrations.Up(ctx, f.DB.DB), "invalid metric amount")
+	require.NoError(t, f.DB.DB.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name='metric_amounts'`).Scan(&count))
+	require.Zero(t, count)
+	_, err = f.DB.DB.Exec(`UPDATE account_balances SET balance_units='100' WHERE account_type='allocation_available'; PRAGMA ignore_check_constraints=OFF`)
+	require.NoError(t, err)
+	require.NoError(t, migrations.Up(ctx, f.DB.DB))
+	testutil.AssertMetricSnapshot(t, f.DB)
 }
 
 func TestEscrowReportUsesArbitraryWidthAmounts(t *testing.T) {
@@ -142,6 +226,63 @@ func TestEscrowSnapshotIsAHardReorgBoundary(t *testing.T) {
 	if !found || next != 6 || gotHash != hash {
 		t.Fatal(next, gotHash, found)
 	}
+}
+
+func TestEscrowMetricsSharedOwner(t *testing.T) {
+	f := testutil.New(t, "100")
+	ctx := t.Context()
+	opening := store.EscrowSnapshot{ChainID: "42161", Contract: testutil.Contract, Sender: testutil.Sender, Deposit: "7", Reserve: "3"}
+	require.NoError(t, f.DB.BootstrapChain(ctx, "first", store.Block{Number: -1}, []store.EscrowSnapshot{opening}))
+	// The second stream registers the already funded account without adding funds.
+	opening.Deposit, opening.Reserve = "0", "0"
+	require.NoError(t, f.DB.BootstrapChain(ctx, "second", store.Block{Number: -1}, []store.EscrowSnapshot{opening}))
+	check := func(deposit, reserve string, unfunded int64) {
+		t.Helper()
+		for _, item := range []struct{ bucket, amount string }{{"deposit", deposit}, {"reserve", reserve}} {
+			var amount string
+			var empty int64
+			require.NoError(t, f.DB.DB.QueryRow(`SELECT amount_units FROM metric_amounts WHERE name=? AND currency='eth'`, "escrow_"+item.bucket).Scan(&amount))
+			require.Equal(t, item.amount, amount)
+			require.NoError(t, f.DB.DB.QueryRow(`SELECT value FROM metric_counts WHERE kind='escrow_unfunded_signers' AND label1=? AND label2=''`, item.bucket).Scan(&empty))
+			require.Equal(t, unfunded, empty)
+		}
+		assertMetricSummaryRebuild(t, f.DB)
+	}
+	check("14", "6", 0)
+	withdraw := store.EscrowEvent{Type: store.Withdrawal, ChainID: "42161", Contract: testutil.Contract, Sender: testutil.Sender, TxHash: testutil.PM, BlockHash: testutil.PM, BlockNumber: 1, Amount: "0", DepositAmount: "7", ReserveAmount: "3"}
+	require.NoError(t, f.DB.ApplyChain(ctx, "first", []store.Block{{Number: 1, Hash: withdraw.BlockHash}}, []store.EscrowEvent{withdraw}, 10))
+	check("0", "0", 2)
+	deposit := withdraw
+	deposit.Type, deposit.Amount, deposit.DepositAmount, deposit.ReserveAmount = store.DepositFunded, "5", "0", "0"
+	deposit.BlockNumber, deposit.LogIndex, deposit.BlockHash = 2, 1, "0x"+strings.Repeat("2", 64)
+	reserve := deposit
+	reserve.Type, reserve.Amount, reserve.LogIndex = store.ReserveFunded, "11", 2
+	require.NoError(t, f.DB.ApplyChain(ctx, "first", []store.Block{{Number: 2, Hash: deposit.BlockHash}}, []store.EscrowEvent{deposit, reserve}, 10))
+	check("10", "22", 0)
+}
+
+func TestMetricSummaryReversalFailure(t *testing.T) {
+	f := testutil.New(t, "100")
+	ctx := t.Context()
+	require.NoError(t, f.DB.BootstrapChain(ctx, "chain", store.Block{Number: -1}, []store.EscrowSnapshot{{ChainID: "42161", Contract: testutil.Contract, Sender: testutil.Sender, Deposit: "10", Reserve: "0"}}))
+	settlement := store.Settlement{ChainID: "42161", Contract: testutil.Contract, Sender: testutil.Sender, Recipient: testutil.Orch, TxHash: testutil.PM, BlockHash: testutil.PM, BlockNumber: 1, FaceValue: "10", PaidAmount: "10", DepositPaid: "10", ReservePaid: "0", WinProb: "1", Nonce: "0", Rand: "0", PMSessionID: testutil.PM, AuxData: "0x", Timestamp: 1}
+	event := store.EscrowEvent{Type: store.WinningTicketRedeemed, ChainID: settlement.ChainID, Contract: settlement.Contract, Sender: settlement.Sender, Recipient: settlement.Recipient, TxHash: settlement.TxHash, BlockHash: settlement.BlockHash, BlockNumber: 1, Amount: "10", DepositAmount: "10", ReserveAmount: "0", Timestamp: 1, Settlement: &settlement}
+	_, err := f.DB.DB.Exec(`CREATE TRIGGER fail_settlement BEFORE UPDATE ON metric_amounts WHEN NEW.name='settlement_face_value' BEGIN SELECT RAISE(ABORT,'settlement summary'); END`)
+	require.NoError(t, err)
+	require.ErrorContains(t, f.DB.ApplyChain(ctx, "chain", []store.Block{{Number: 1, Hash: testutil.PM}}, []store.EscrowEvent{event}, 10), "settlement summary")
+	_, err = f.DB.DB.Exec(`DROP TRIGGER fail_settlement`)
+	require.NoError(t, err)
+	require.NoError(t, f.DB.ApplyChain(ctx, "chain", []store.Block{{Number: 1, Hash: testutil.PM}}, []store.EscrowEvent{event}, 10))
+	before := metricSummaryState(t, f.DB)
+	_, err = f.DB.DB.Exec(`CREATE TRIGGER fail_settlement BEFORE UPDATE ON metric_amounts WHEN NEW.name='settlement_face_value' BEGIN SELECT RAISE(ABORT,'settlement summary'); END`)
+	require.NoError(t, err)
+	require.ErrorContains(t, f.DB.Rewind(ctx, "chain", "42161", testutil.Contract, store.Block{Number: 0, Hash: testutil.PM}), "settlement summary")
+	require.Equal(t, before, metricSummaryState(t, f.DB))
+	testutil.AssertMetricSnapshot(t, f.DB)
+	_, err = f.DB.DB.Exec(`DROP TRIGGER fail_settlement`)
+	require.NoError(t, err)
+	require.NoError(t, f.DB.Rewind(ctx, "chain", "42161", testutil.Contract, store.Block{Number: 0, Hash: testutil.PM}))
+	assertMetricSummaryRebuild(t, f.DB)
 }
 
 func TestIngestExactMoneyReplayQuarantineOverdraw(t *testing.T) {
@@ -188,6 +329,40 @@ func TestIngestExactMoneyReplayQuarantineOverdraw(t *testing.T) {
 	defer db.Close()
 	require.NoError(t, db.Ingest(ctx, "test", 0, 3, f.Event(t, "event-2", "17", testutil.PM)))
 	assertBalanced(t, f.DB)
+}
+
+func TestMetricSummaryFailureRollsBack(t *testing.T) {
+	for _, operation := range []string{"funding", "quarantine", "bootstrap"} {
+		t.Run(operation, func(t *testing.T) {
+			f := testutil.New(t, "100")
+			ctx := t.Context()
+			before := f.ManagementState(t)
+			var err error
+			switch operation {
+			case "funding":
+				_, err = f.DB.DB.Exec(`CREATE TRIGGER fail_summary BEFORE UPDATE ON metric_amounts BEGIN SELECT RAISE(ABORT,'summary failed'); END`)
+				require.NoError(t, err)
+				err = f.DB.Fund(ctx, "grant", f.Grant, "1")
+			case "quarantine":
+				_, err = f.DB.DB.Exec(`CREATE TRIGGER fail_summary BEFORE INSERT ON metric_counts BEGIN SELECT RAISE(ABORT,'summary failed'); END`)
+				require.NoError(t, err)
+				err = f.DB.Ingest(ctx, "events", 0, 0, []byte("{bad"))
+				var count int
+				require.NoError(t, f.DB.DB.QueryRow(`SELECT (SELECT count(*) FROM usage_events)+(SELECT count(*) FROM ingestion_checkpoints)`).Scan(&count))
+				require.Zero(t, count)
+			case "bootstrap":
+				_, err = f.DB.DB.Exec(`CREATE TRIGGER fail_summary BEFORE INSERT ON metric_balances BEGIN SELECT RAISE(ABORT,'summary failed'); END`)
+				require.NoError(t, err)
+				err = f.DB.BootstrapChain(ctx, "chain", store.Block{Number: -1}, []store.EscrowSnapshot{{ChainID: "42161", Contract: testutil.Contract, Sender: testutil.Sender, Deposit: "0", Reserve: "0"}})
+				var count int
+				require.NoError(t, f.DB.DB.QueryRow(`SELECT count(*) FROM escrow_snapshots`).Scan(&count))
+				require.Zero(t, count)
+			}
+			require.ErrorContains(t, err, "summary failed")
+			require.Equal(t, before, f.ManagementState(t))
+			testutil.AssertMetricSnapshot(t, f.DB)
+		})
+	}
 }
 
 func TestIngestManifestID(t *testing.T) {
@@ -307,6 +482,43 @@ func TestQuarantineBindingsAndConflictingID(t *testing.T) {
 	if bal.String() != "90" {
 		t.Fatal(bal)
 	}
+}
+
+func TestStableRematchDoesNotWriteSettlementMetrics(t *testing.T) {
+	f := testutil.New(t, "100")
+	insertMetricSettlement(t, f.DB, "redemption", "10", "7", "settled")
+	insertMetricSettlement(t, f.DB, "orphaned", "10", "7", "orphaned")
+	require.NoError(t, migrations.Down(t.Context(), f.DB.DB))
+	require.NoError(t, migrations.Up(t.Context(), f.DB.DB))
+	require.NoError(t, f.DB.Ingest(t.Context(), "events", 0, 0, f.Event(t, "first", "1", testutil.PM)))
+	testutil.AssertMetricSnapshot(t, f.DB)
+	_, err := f.DB.DB.Exec(`CREATE TRIGGER fail_rematch BEFORE UPDATE ON settlements BEGIN SELECT RAISE(ABORT,'stable rematch wrote settlement'); END;
+ CREATE TRIGGER fail_count BEFORE UPDATE ON metric_counts WHEN NEW.kind='settlements' BEGIN SELECT RAISE(ABORT,'stable rematch wrote count'); END;`)
+	require.NoError(t, err)
+	require.NoError(t, f.DB.Ingest(t.Context(), "events", 0, 1, f.Event(t, "second", "1", testutil.PM)))
+	testutil.AssertMetricSnapshot(t, f.DB)
+	_, err = f.DB.DB.Exec(`DROP TRIGGER fail_rematch; DROP TRIGGER fail_count`)
+	require.NoError(t, err)
+	state := *f.Request.State
+	state.StateID = "another-state"
+	request := f.Request
+	request.State = &state
+	decision, err := f.DB.Authorize(t.Context(), request)
+	require.NoError(t, err)
+	var event map[string]any
+	require.NoError(t, json.Unmarshal(f.Event(t, "ambiguous", "1", testutil.PM), &event))
+	event["data"].(map[string]any)["auth_id"] = decision.AuthID
+	event["data"].(map[string]any)["session_id"] = state.StateID
+	raw, err := json.Marshal(event)
+	require.NoError(t, err)
+	require.NoError(t, f.DB.Ingest(t.Context(), "events", 0, 2, raw))
+	testutil.AssertMetricSnapshot(t, f.DB)
+	for _, status := range []string{"settled", "orphaned"} {
+		var n int
+		require.NoError(t, f.DB.DB.QueryRow(`SELECT value FROM metric_counts WHERE kind='settlements' AND label1=? AND label2='ambiguous'`, status).Scan(&n))
+		require.Equal(t, 1, n)
+	}
+	assertMetricSummaryRebuild(t, f.DB)
 }
 
 func TestConcurrentFundingCannotOverallocate(t *testing.T) {

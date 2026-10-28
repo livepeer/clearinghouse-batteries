@@ -25,6 +25,9 @@ approximate ETH/USD samples; keep currencies separate. Overdraw is summed before
 aggregation, so positive allocations cannot conceal negative ones. Chain totals
 start at `chain_start_block`; escrow includes its opening snapshot.
 
+Database gauges use bounded reads of summaries updated atomically with source
+records, even when metrics are disabled.
+
 Kafka lag measures the durable checkpoint. Zero lag does not establish billing:
 check quarantined/ignored outcomes. Quarantines are retained audit records, not a
 retry queue; use usage/ledger reports to investigate. Same-offset replay is not
