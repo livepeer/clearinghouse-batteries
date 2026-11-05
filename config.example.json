@@ -2,7 +2,6 @@
   "DBPath": "clearinghouse.db",
   "EnableAuthWebhook": ":8080",
   "EnableManagementAPI": "",
-  "UnsafeHTTPBind": false,
   "EnableKafka": true,
   "EnableAccounting": true,
   "EnableOnchainListener": false,
