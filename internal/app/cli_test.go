@@ -36,9 +36,9 @@ func cli(t *testing.T, args ...string) string {
 	return out.String()
 }
 
-func mustHTTPBind(t testing.TB, value string) HTTPBind {
+func mustHTTPBind(t testing.TB, value string) boa.HTTPBind {
 	t.Helper()
-	var bind HTTPBind
+	var bind boa.HTTPBind
 	require.NoError(t, bind.UnmarshalText([]byte(value)))
 	return bind
 }
@@ -192,7 +192,7 @@ func TestBoaConfigEnvironmentValidationAndHelp(t *testing.T) {
 		}
 	}
 	help := cli(t, "serve", "--help")
-	for _, want := range []string{"--enable-auth-webhook string", "--unsafe-http-bind", "CLEARINGHOUSE_UNSAFE_HTTP_BIND", "--enable-kafka", "--enable-onchain-listener", "Run on-chain RPC listener", "--ticket-broker", "--start-block", "--config-file", "Configuration file", "CLEARINGHOUSE_DB_PATH", "CLEARINGHOUSE_TICKET_BROKER", "--creds-file", "CLEARINGHOUSE_CREDS_FILE", "--rpc-url-file", "CLEARINGHOUSE_RPC_URL_FILE"} {
+	for _, want := range []string{"--enable-auth-webhook string", "unsafe@", "--enable-kafka", "--enable-onchain-listener", "Run on-chain RPC listener", "--ticket-broker", "--start-block", "--config-file", "Configuration file", "CLEARINGHOUSE_DB_PATH", "CLEARINGHOUSE_TICKET_BROKER", "--creds-file", "CLEARINGHOUSE_CREDS_FILE", "--rpc-url-file", "CLEARINGHOUSE_RPC_URL_FILE"} {
 		if !strings.Contains(help, want) {
 			t.Fatalf("help missing %s", want)
 		}
@@ -213,6 +213,8 @@ func TestBoaConfigEnvironmentValidationAndHelp(t *testing.T) {
 	if strings.Contains(help, "--http-bind string") {
 		t.Fatal("removed HTTP bind option exposed")
 	}
+	require.NotContains(t, help, "--unsafe-http-bind")
+	require.NotContains(t, help, "CLEARINGHOUSE_UNSAFE_HTTP_BIND")
 	for _, line := range strings.Split(help, "\n") {
 		if strings.Contains(line, "--enable-auth-webhook") && strings.Contains(line, "default") {
 			t.Fatal("auth webhook bind has a default")
