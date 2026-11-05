@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "repository": "livepeer/clearinghouse-batteries",
+  "source_workflow": ".github/workflows/build.yml",
+  "source_workflow_name": "Build",
+  "source_event": "push",
+  "source_branch": "main",
+  "receiver_repository": "livepeer/simple-infra",
+  "receiver_workflow": "agent-fleet-build.yaml",
+  "receiver_ref": "main",
+  "notification_gate": "FLEET_CI_NOTIFY_ENABLED",
+  "affected_components": [
+    "clearinghouse"
+  ]
+}
