@@ -2,8 +2,9 @@
 
 Enable `--enable-metrics :9094`, `CLEARINGHOUSE_ENABLE_METRICS=:9094`, or
 `EnableMetrics = ":9094"`. Metrics are disabled by default. Keep this unauthenticated
-port private; non-loopback binds require `--unsafe-http-bind` and network access
-controls. The endpoint does not change `/readyz`.
+port private; non-loopback binds require network access controls and an `unsafe@`
+prefix, as in `--enable-metrics unsafe@0.0.0.0:9094`. The endpoint does not change
+`/readyz`.
 
 Use `prometheus.yml` as a scrape example (15 seconds). Give components sharing a
 database the same `clearinghouse` label and distinct `instance` labels; scrape each

@@ -16,9 +16,7 @@ import (
 )
 
 func TestMetricsBindValidation(t *testing.T) {
-	p := ServeParams{MaxKafkaLag: time.Minute, EnableMetrics: mustHTTPBind(t, "0.0.0.0:9094"), EnableKafka: true, CredsFile: "unused", KafkaBind: "127.0.0.1:9092", KafkaTopic: "events"}
-	require.ErrorContains(t, p.Validate(), "metrics bind")
-	p.UnsafeHTTPBind = true
+	p := ServeParams{MaxKafkaLag: time.Minute, EnableMetrics: mustHTTPBind(t, "unsafe@0.0.0.0:9094"), EnableKafka: true, CredsFile: "unused", KafkaBind: "127.0.0.1:9092", KafkaTopic: "events"}
 	require.NoError(t, p.Validate())
 	p.EnableAuthWebhook = p.EnableMetrics
 	require.ErrorContains(t, p.Validate(), "separate TCP port")

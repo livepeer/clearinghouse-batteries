@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -16,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/j0sh/boa/pkg/boa"
 	"github.com/j0sh/minikafka"
 	"github.com/livepeer/clearinghouse/internal/auth"
 	"github.com/livepeer/clearinghouse/internal/chain"
@@ -33,34 +33,11 @@ type Common struct {
 
 func (p Common) configPath() string { return p.ConfigFile }
 
-type HTTPBind struct{ netip.AddrPort }
-
-func (b *HTTPBind) UnmarshalText(text []byte) error {
-	raw := string(text)
-	if raw == "" {
-		b.AddrPort = netip.AddrPort{}
-		return nil
-	}
-	if strings.HasPrefix(raw, ":") {
-		raw = "127.0.0.1" + raw
-	}
-	addr, err := netip.ParseAddrPort(raw)
-	if err != nil {
-		return err
-	}
-	if addr.Port() == 0 {
-		return errors.New("TCP port must be between 1 and 65535")
-	}
-	b.AddrPort = addr
-	return nil
-}
-
 type ServeParams struct {
 	Common
-	EnableMetrics         HTTPBind      `optional:"true" descr:"Private Prometheus metrics listener; :port binds to loopback"`
-	EnableAuthWebhook     HTTPBind      `optional:"true" descr:"Run signer authorization HTTP server on IP:port; :port binds to 127.0.0.1"`
-	EnableManagementAPI   HTTPBind      `optional:"true" descr:"Run management HTTP server on IP:port; :port binds to 127.0.0.1"`
-	UnsafeHTTPBind        bool          `name:"unsafe-http-bind" optional:"true" descr:"Allow HTTP servers to bind to a non-loopback IP"`
+	EnableMetrics         boa.HTTPBind  `optional:"true" descr:"Private Prometheus metrics listener; :port binds to loopback; unsafe@ prefix for non-loopback"`
+	EnableAuthWebhook     boa.HTTPBind  `optional:"true" descr:"Run signer authorization HTTP server on IP:port; :port binds to loopback; unsafe@ prefix for non-loopback"`
+	EnableManagementAPI   boa.HTTPBind  `optional:"true" descr:"Run management HTTP server on IP:port; :port binds to loopback; unsafe@ prefix for non-loopback"`
 	EnableKafka           bool          `optional:"true" descr:"Run embedded Kafka broker"`
 	EnableAccounting      bool          `optional:"true" descr:"Run accounting service"`
 	KafkaBroker           string        `optional:"true" descr:"External Kafka broker address (host:port)"`
@@ -88,10 +65,7 @@ func (p ServeParams) chainConfig() chain.Config {
 
 func (p ServeParams) Validate() error {
 	if p.EnableMetrics.IsValid() {
-		if !p.EnableMetrics.Addr().IsLoopback() && !p.UnsafeHTTPBind {
-			return errors.New("metrics bind must be loopback; use --unsafe-http-bind to override")
-		}
-		for _, b := range []HTTPBind{p.EnableAuthWebhook, p.EnableManagementAPI} {
+		for _, b := range []boa.HTTPBind{p.EnableAuthWebhook, p.EnableManagementAPI} {
 			if b.IsValid() && b.Port() == p.EnableMetrics.Port() {
 				return errors.New("metrics requires a separate TCP port")
 			}
@@ -102,13 +76,8 @@ func (p ServeParams) Validate() error {
 	if !webhookEnabled && !managementEnabled && !p.EnableKafka && !p.EnableAccounting && !p.EnableOnchainListener {
 		return errors.New("enable at least one of --enable-auth-webhook, --enable-management-api, --enable-kafka, --enable-accounting, --enable-onchain-listener")
 	}
-	if managementEnabled {
-		if !p.EnableManagementAPI.Addr().IsLoopback() && !p.UnsafeHTTPBind {
-			return errors.New("management bind must be a loopback IP; use --unsafe-http-bind to allow a non-loopback address")
-		}
-		if webhookEnabled && p.EnableManagementAPI.Port() == p.EnableAuthWebhook.Port() {
-			return errors.New("management and auth webhook must use separate TCP ports")
-		}
+	if managementEnabled && webhookEnabled && p.EnableManagementAPI.Port() == p.EnableAuthWebhook.Port() {
+		return errors.New("management and auth webhook must use separate TCP ports")
 	}
 	if p.EnableKafka && p.KafkaBroker != "" {
 		return errors.New("--kafka-broker cannot be used with --enable-kafka")
@@ -139,11 +108,6 @@ func (p ServeParams) Validate() error {
 	if p.EnableKafka || p.EnableAccounting || webhookEnabled {
 		if !regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$`).MatchString(p.KafkaTopic) {
 			return errors.New("invalid Kafka topic")
-		}
-	}
-	if webhookEnabled {
-		if !p.EnableAuthWebhook.Addr().IsLoopback() && !p.UnsafeHTTPBind {
-			return errors.New("auth webhook bind must be a loopback IP; use --unsafe-http-bind to allow a non-loopback address")
 		}
 	}
 	if p.EnableKafka {
