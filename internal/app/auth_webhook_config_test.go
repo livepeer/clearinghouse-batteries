@@ -2,73 +2,85 @@ package app
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/j0sh/boa/pkg/boa"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 )
 
-func TestHTTPBindParsing(t *testing.T) {
-	for _, tc := range []struct {
-		input string
-		want  string
-	}{
-		{":8080", "127.0.0.1:8080"},
-		{"127.0.0.2:8081", "127.0.0.2:8081"},
-		{"[::1]:8082", "[::1]:8082"},
+func TestHTTPBindValidation(t *testing.T) {
+	for _, listener := range []struct{ field, flag string }{
+		{"EnableAuthWebhook", "enable-auth-webhook"},
+		{"EnableManagementAPI", "enable-management-api"},
+		{"EnableMetrics", "enable-metrics"},
 	} {
-		t.Run(tc.input, func(t *testing.T) {
-			var bind HTTPBind
-			require.NoError(t, bind.UnmarshalText([]byte(tc.input)))
-			require.Equal(t, tc.want, bind.String())
-			require.True(t, bind.IsValid())
-		})
-	}
-
-	var disabled HTTPBind
-	require.NoError(t, disabled.UnmarshalText(nil))
-	require.False(t, disabled.IsValid())
-
-	for _, input := range []string{
-		"true",
-		"127.0.0.1",
-		"127.0.0.1:",
-		":0",
-		":65536",
-		":http",
-		"localhost:8080",
-		"::1:8080",
-	} {
-		t.Run("invalid_"+input, func(t *testing.T) {
-			var bind HTTPBind
-			require.Error(t, bind.UnmarshalText([]byte(input)))
-		})
+		for _, source := range []string{"flag", "env", "json", "toml"} {
+			for _, tc := range []struct {
+				input, want string
+				invalid     bool
+			}{
+				{":8080", "127.0.0.1:8080", false},
+				{"[::1]:8080", "[::1]:8080", false},
+				{"0.0.0.0:8080", "", true},
+				{"unsafe@0.0.0.0:8080", "0.0.0.0:8080", false},
+			} {
+				t.Run(listener.field+"/"+source+"/"+tc.input, func(t *testing.T) {
+					var got ServeParams
+					called := false
+					cmd := command[ServeParams]("serve", "test", func(p *ServeParams, _ *cobra.Command) error {
+						got, called = *p, true
+						return nil
+					})
+					cmd.SetOut(io.Discard)
+					cmd.SetErr(io.Discard)
+					args := []string{}
+					switch source {
+					case "flag":
+						args = append(args, "--"+listener.flag, tc.input)
+					case "env":
+						t.Setenv("CLEARINGHOUSE_"+strings.ToUpper(strings.ReplaceAll(listener.flag, "-", "_")), tc.input)
+					case "json", "toml":
+						config := fmt.Sprintf("{%q: %q}", listener.field, tc.input)
+						if source == "toml" {
+							config = fmt.Sprintf("%s = %q\n", listener.field, tc.input)
+						}
+						path := filepath.Join(t.TempDir(), "serve."+source)
+						require.NoError(t, os.WriteFile(path, []byte(config), 0600))
+						args = append(args, "--config-file", path)
+					}
+					cmd.SetArgs(args)
+					err := cmd.Execute()
+					if tc.invalid {
+						require.ErrorContains(t, err, "unsafe@"+tc.input)
+						require.True(t, boa.IsUserInputError(err))
+						require.False(t, called)
+						return
+					}
+					require.NoError(t, err)
+					require.True(t, called)
+					bind := map[string]boa.HTTPBind{
+						"EnableAuthWebhook":   got.EnableAuthWebhook,
+						"EnableManagementAPI": got.EnableManagementAPI,
+						"EnableMetrics":       got.EnableMetrics,
+					}[listener.field]
+					require.Equal(t, tc.want, bind.String())
+				})
+			}
+		}
 	}
 }
 
-func TestAuthWebhookBindValidation(t *testing.T) {
-	for _, input := range []string{":8080", "127.0.0.2:8080", "[::1]:8080"} {
-		t.Run("loopback_"+input, func(t *testing.T) {
-			p := ServeParams{MaxKafkaLag: time.Minute, KafkaTopic: "livepeer-signing", EnableAuthWebhook: mustHTTPBind(t, input), CredsFile: "creds.json"}
-			require.NoError(t, p.Validate())
-		})
-	}
-
-	for _, input := range []string{"0.0.0.0:8080", "[::]:8080", "10.0.0.1:8080", "8.8.8.8:8080"} {
-		t.Run("non_loopback_"+input, func(t *testing.T) {
-			p := ServeParams{MaxKafkaLag: time.Minute, KafkaTopic: "livepeer-signing", EnableAuthWebhook: mustHTTPBind(t, input), CredsFile: "creds.json"}
-			require.ErrorContains(t, p.Validate(), "--unsafe-http-bind")
-			p.UnsafeHTTPBind = true
-			require.NoError(t, p.Validate())
-		})
-	}
-
+func TestAuthWebhookRequiresCredentials(t *testing.T) {
 	p := ServeParams{MaxKafkaLag: time.Minute, KafkaTopic: "livepeer-signing", EnableAuthWebhook: mustHTTPBind(t, ":8080")}
 	require.ErrorContains(t, p.Validate(), "--creds-file")
-	require.NoError(t, (ServeParams{MaxKafkaLag: time.Minute, UnsafeHTTPBind: true, EnableKafka: true, CredsFile: "creds.json", KafkaBind: "127.0.0.1:9092", KafkaTopic: "events"}).Validate())
+	p.CredsFile = "creds.json"
+	require.NoError(t, p.Validate())
 }
 
 func TestServeConfigPrecedence(t *testing.T) {
@@ -104,9 +116,8 @@ func TestServeConfigPrecedence(t *testing.T) {
 	require.Equal(t, envCredsPath, fromEnv.CredsFile)
 	require.Equal(t, "env:9093", fromEnv.KafkaAdvertisedAddr)
 
-	got := read("--config-file", path, "--enable-auth-webhook", ":7103", "--creds-file", credsPath, "--unsafe-http-bind", "--kafka-advertised-addr", "flag:9093")
-	require.Equal(t, "127.0.0.1:7103", got.EnableAuthWebhook.String())
+	got := read("--config-file", path, "--enable-auth-webhook", "unsafe@0.0.0.0:7103", "--creds-file", credsPath, "--kafka-advertised-addr", "flag:9093")
+	require.Equal(t, "0.0.0.0:7103", got.EnableAuthWebhook.String())
 	require.Equal(t, credsPath, got.CredsFile)
-	require.True(t, got.UnsafeHTTPBind)
 	require.Equal(t, "flag:9093", got.KafkaAdvertisedAddr)
 }

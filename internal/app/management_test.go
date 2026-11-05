@@ -258,15 +258,6 @@ func TestManagementErrors(t *testing.T) {
 }
 
 func TestManagementBindValidation(t *testing.T) {
-	for _, address := range []string{":8081", "127.0.0.2:8081", "[::1]:8081"} {
-		require.NoError(t, (ServeParams{MaxKafkaLag: time.Minute, KafkaTopic: "livepeer-signing", EnableManagementAPI: mustHTTPBind(t, address), CredsFile: "creds.json"}).Validate())
-	}
-	for _, address := range []string{"0.0.0.0:8081", "[::]:8081", "10.0.0.1:8081"} {
-		p := ServeParams{MaxKafkaLag: time.Minute, KafkaTopic: "livepeer-signing", EnableManagementAPI: mustHTTPBind(t, address), CredsFile: "creds.json"}
-		require.ErrorContains(t, p.Validate(), "--unsafe-http-bind")
-		p.UnsafeHTTPBind = true
-		require.NoError(t, p.Validate())
-	}
 	p := ServeParams{MaxKafkaLag: time.Minute, KafkaTopic: "livepeer-signing", EnableManagementAPI: mustHTTPBind(t, ":8081"), EnableAuthWebhook: mustHTTPBind(t, "[::1]:8081"), CredsFile: "creds.json"}
 	require.ErrorContains(t, p.Validate(), "separate TCP ports")
 	p.EnableAuthWebhook = mustHTTPBind(t, ":8080")

@@ -8,8 +8,8 @@
   proxy and clearinghouse. Restrict source addresses with a firewall; do not
   expose plaintext listeners to the internet.
 - Kafka needs a TLS TCP proxy; accounting can connect locally. SASL and HTTP
-  credentials are still required. `--unsafe-http-bind` only permits a bind;
-  it adds no TLS or access control.
+  credentials are still required. The `unsafe@` HTTP address prefix only permits
+  a non-loopback bind; it adds no TLS or access control.
 - Health routes require no credentials. Restrict their exposure; `/readyz`
   checks the database and shutdown state, not accounting progress.
 

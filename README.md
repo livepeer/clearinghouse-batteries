@@ -318,10 +318,12 @@ as one consistent set. Test restoration regularly.
 
 ### HTTP listeners
 
-Both HTTP listeners require an explicit port: `:8080` binds to `127.0.0.1:8080`.
-Use IPv4 or bracketed IPv6 literals. Non-loopback and wildcard binds require
-`--unsafe-http-bind`, which adds no TLS or access control. The webhook and
-management API must use different ports; expose them through TLS proxies.
+HTTP listeners require an explicit port: `:8080` binds to `127.0.0.1:8080`.
+Use IPv4 or bracketed IPv6 literals. Non-loopback and wildcard binds require an
+`unsafe@` prefix on each address, such as `--enable-auth-webhook unsafe@0.0.0.0:8080`.
+This adds no TLS or access control. The webhook, management API, and metrics
+listeners must use different ports; for external access, expose them through TLS
+proxies.
 
 See [API.md](API.md) for the webhook, management, and health endpoints.
 

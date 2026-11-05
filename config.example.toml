@@ -10,8 +10,8 @@ EnableOnchainListener = false
 
 # Required when the webhook, management API, or embedded Kafka is enabled.
 CredsFile = "/run/secrets/clearinghouse-creds.toml"
-# Non-loopback and wildcard HTTP binds additionally require UnsafeHTTPBind = true.
-# UnsafeHTTPBind = true
+# Prefix each non-loopback or wildcard HTTP bind with unsafe@,
+# e.g. "unsafe@0.0.0.0:8080".
 # Run the HTTP listeners behind a terminating TLS proxy.
 
 # Run a TLS proxy at KafkaAdvertisedAddr in front of the embedded broker.
