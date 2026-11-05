@@ -23,6 +23,9 @@ defaults:
 
 jobs:
   publish:
+    if: >-
+      !github.event.pull_request ||
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-26.04
     environment: docker-publish
     timeout-minutes: 15
