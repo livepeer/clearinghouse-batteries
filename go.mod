@@ -7,7 +7,7 @@ require (
 	github.com/ethereum/go-ethereum v1.17.10
 	github.com/j0sh/boa v1.0.4
 	github.com/j0sh/minikafka v0.0.0-20261016010625-aeee8b249880
-	github.com/mattn/go-sqlite3 v1.14.52
+	github.com/mattn/go-sqlite3 v1.14.53
 	github.com/prometheus/client_golang v1.25.0
 	github.com/segmentio/kafka-go v0.4.51
 	github.com/spf13/cobra v1.10.2
