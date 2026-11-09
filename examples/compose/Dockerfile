@@ -1,4 +1,4 @@
-FROM golang:1.27.3-bookworm@sha256:d9b6a1beb9474adc2a1ce842573639b44b2a0dd49b6669f51d3821baf9ec37c9 AS build
+FROM golang:1.27.3-bookworm@sha256:dc0963f32053e4bc451d24d87e3892d42d01021b61f093e98eb95c0352bb84b0 AS build
 ENV CGO_ENABLED=1 GOTOOLCHAIN=local GOENV=off GOWORK=off GOFLAGS=-mod=readonly
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -19,7 +19,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 FROM scratch AS binaries
 COPY --from=build /out/ /
 
-FROM debian:bookworm-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
 COPY --from=binaries / /usr/local/bin/
 ENTRYPOINT ["clearinghouse"]
