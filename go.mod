@@ -5,15 +5,15 @@ go 1.27.4
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/ethereum/go-ethereum v1.17.10
-	github.com/j0sh/boa v1.0.4
+	github.com/j0sh/boa v1.0.5
 	github.com/j0sh/minikafka v0.0.0-20261016010625-aeee8b249880
-	github.com/mattn/go-sqlite3 v1.14.52
+	github.com/mattn/go-sqlite3 v1.14.53
 	github.com/prometheus/client_golang v1.25.0
 	github.com/segmentio/kafka-go v0.4.51
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.12.1
 	github.com/xdg-go/stringprep v1.0.4
-	golang.org/x/sync v0.24.0
+	golang.org/x/sync v0.25.0
 )
 
 require (
