@@ -329,7 +329,7 @@ See [API.md](API.md) for the webhook, management, and health endpoints.
 
 ## Development
 
-Builds require Go 1.27.3, CGO, and a C compiler for SQLite. `make check` runs
+Builds require Go 1.27.4, CGO, and a C compiler for SQLite. `make check` runs
 race-enabled tests, `go vet`, Staticcheck, a vulnerability scan, and a production
 build. Tests use local fixtures without a live chain or production credentials.
 Run `./bin/clearinghouse --version` to inspect the version and source commit.

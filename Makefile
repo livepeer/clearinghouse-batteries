@@ -1,4 +1,4 @@
-export GOTOOLCHAIN := go1.27.3
+export GOTOOLCHAIN := go1.27.4
 export CGO_ENABLED := 1
 
 COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
