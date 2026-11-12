@@ -334,6 +334,11 @@ race-enabled tests, `go vet`, Staticcheck, a vulnerability scan, and a productio
 build. Tests use local fixtures without a live chain or production credentials.
 Run `./bin/clearinghouse --version` to inspect the version and source commit.
 
+Successful `main` builds publish
+`ghcr.io/livepeer/clearinghouse-batteries:sha-<full-commit-sha>` for Linux amd64
+and arm64. Use the manifest digest (`@sha256:…`) to pin the same image across
+deployments.
+
 To release, set [VERSION](VERSION) to the next `MAJOR.MINOR.PATCH`, merge it to
 `main`, and run [Release](.github/workflows/release.yml) from GitHub Actions.
 Retry failures with **Re-run failed jobs** until artifacts expire after 7d, or
