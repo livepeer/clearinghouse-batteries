@@ -1,4 +1,4 @@
-name: Build
+name: Build and publish Clearinghouse images
 
 on:
   pull_request:
