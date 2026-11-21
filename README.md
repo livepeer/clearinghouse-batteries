@@ -269,7 +269,8 @@ write the URL without a trailing newline.
 
 The accounting database defaults to `clearinghouse.db` in the working directory.
 Embedded Kafka's `minikafka_*.db` files are stored beside the database selected
-by `--db-path`.
+by `--db-path`. Use the same `--db-path` for service and CLI commands that share
+a database.
 
 | Command | Purpose |
 | --- | --- |
