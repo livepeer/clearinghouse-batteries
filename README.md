@@ -340,6 +340,8 @@ To release, set [VERSION](VERSION) to the next `MAJOR.MINOR.PATCH`, merge it to
 Retry failures with **Re-run failed jobs** until artifacts expire after 7d, or
 rerun all jobs.
 
+Use an image digest to select an exact container build.
+
 See [SECURITY.md](SECURITY.md) for deployment security.
 
 ### Metrics
